@@ -1,0 +1,25 @@
+{
+  "project": "Stealth Client BOD Scanner",
+  "status": "Working",
+  "key_learnings": [
+    "Stealth API: Use FindCount() not GetFindCount()",
+    "Stealth API: CloseSimpleGump must be iterated backwards",
+    "Gump Parsing: 'Amount' field is plain text (GumpText), others are HTML (XmfHTMLGumpColor)",
+    "Parsing Strategy: Group by Y-coordinate (Row) then identify by X-coordinate (Column)",
+    "Large BOD Fix: Large BODs may visually report '0' amount; logic must 'steal' correct quantity from child components",
+    "Material Inference: Small BODs often lack visual Material text (defaulting to Iron); logic must infer 'Leather' or 'Cloth' based on item type",
+    "Visual Tolerance: Increased Y-axis tolerance (10px) is required to correctly group Amount text with Item names"
+  ],
+  "files": [
+    {
+      "filename": "bod_data.py",
+      "description": "Contains definitions for Target Sets (Male/Female/Studded/Crier), filtered Reward dictionary (IDs 23 & 24), and component lists.",
+      "content": "Updated with specific Tailor sets and logic to ignore non-target rewards."
+    },
+    {
+      "filename": "gemini_BodScanner.py",
+      "description": "Main scanner script. Features 2-pass parsing (Raw -> Final), material inference, and a 'Set Progress Report' that calculates potential full sets from inventory.",
+      "content": "See Script code"
+    }
+  ]
+}
