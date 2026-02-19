@@ -1,6 +1,6 @@
 {
-  "project": "Stealth Client BOD Scanner",
-  "status": "Working",
+  "project": "Stealth Client BOD Cycler",
+  "status": "Active Development - Config & Supplies Completed",
   "key_learnings": [
     "Stealth API: Use FindCount() not GetFindCount()",
     "Stealth API: CloseSimpleGump must be iterated backwards",
@@ -8,7 +8,13 @@
     "Parsing Strategy: Group by Y-coordinate (Row) then identify by X-coordinate (Column)",
     "Large BOD Fix: Large BODs may visually report '0' amount; logic must 'steal' correct quantity from child components",
     "Material Inference: Small BODs often lack visual Material text (defaulting to Iron); logic must infer 'Leather' or 'Cloth' based on item type",
-    "Visual Tolerance: Increased Y-axis tolerance (10px) is required to correctly group Amount text with Item names"
+    "Visual Tolerance: Increased Y-axis tolerance (10px) is required to correctly group Amount text with Item names",
+    "Tkinter UI: Tkinter must run in the main thread (using .run() / .mainloop()), not as a daemon thread, to avoid immediate termination.",
+    "Inter-script Communication: The GUI and worker scripts communicate seamlessly by reading/writing to local JSON files (config and supplies).",
+    "Crafting Gump IDs: Shard specific button IDs verified via diagnostic script -> Tinker Tools (23), Sewing Kit (44), Tongs (16).",
+    "Crafting Reliability: Using a text/Cliloc search within the gump (text_in_gump) is much safer than blind waits and button presses.",
+    "World Save Guard: checkWorldSave.py's world_save_guard() must be called inside all 'Wait()' loops, movement loops, and crafting loops to prevent stalling.",
+    "Material IDs & Hues: Cloth uses both 0x1766 and 0x1767. Leather (0x1081) uses specific hues: Normal (0x0000), Spined (0x08AC), Horned (0x0845), Barbed (0x0851)."
   ],
   "files": [
     {
@@ -20,6 +26,21 @@
       "filename": "gemini_BodScanner.py",
       "description": "Main scanner script. Features 2-pass parsing (Raw -> Final), material inference, and a 'Set Progress Report' that calculates potential full sets from inventory.",
       "content": "See Script code"
+    },
+    {
+      "filename": "BodCycler_Config.py",
+      "description": "Tkinter GUI for setting target serials (5 books, crate, dye tub, runebook), saving home coordinates, and testing travel routes.",
+      "content": "Generates [CharName]_bodcycler_config.json. Displays live resource dashboard by reading from supplies JSON."
+    },
+    {
+      "filename": "BodCycler_CheckSupplies.py",
+      "description": "Maintenance script to audit and craft required tools based on 'Tailor' or 'Smith' mode. Restocks ingots and manages tool counts in backpack vs crate.",
+      "content": "Outputs material counts to [CharName]_bodcycler_supplies.json for the GUI. Secured with world_save_guard()."
+    },
+    {
+      "filename": "BodCycler_DebugCraft.py",
+      "description": "Diagnostic tool used to parse a gump's HTML/Clilocs and find the exact X/Y coordinates and ReturnValue buttons for specific text.",
+      "content": "Used once to map the correct Tinkering menu buttons for this specific shard."
     }
   ]
 }
