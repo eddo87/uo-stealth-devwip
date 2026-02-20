@@ -3,7 +3,7 @@ import time
 
 # --- Constants to Test ---
 CRAFT_GUMP_ID = 0x38920abd
-TINKER_TOOL_TYPE = 0x1EB8
+TINKER_TOOL_TYPE = 0x0F9D
 
 # Buttons we are assuming work (to navigate)
 BTN_CATEGORY_TOOLS = 8
