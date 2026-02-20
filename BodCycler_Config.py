@@ -3,8 +3,9 @@ import os
 import json
 import threading
 import time
+import importlib
 from tkinter import *
-from datetime import datetime, timedelta
+from datetime import datetime
 
 # Import the logic modules
 try:
@@ -25,12 +26,11 @@ except ImportError:
 # --- Configuration & Globals ---
 CONFIG_FILE = f"{StealthPath()}Scripts\\{CharName()}_bodcycler_config.json"
 SUPPLY_FILE = f"{StealthPath()}Scripts\\{CharName()}_bodcycler_supplies.json"
+STATS_FILE = f"{StealthPath()}Scripts\\{CharName()}_bodcycler_stats.json"
 ICON_FILE = f"{StealthPath()}Scripts\\icon.ico" 
 
 STATS = {
     "start_time": None,
-    "bods_taken": 0,
-    "bods_given": 0,
     "status": "Idle"
 }
 
@@ -64,6 +64,7 @@ class BodCyclerGUI(threading.Thread):
         self.vars = {} 
         self.running = True
         self.last_supply_mtime = 0
+        self.last_stats_mtime = 0
 
     def load_config(self):
         if os.path.exists(CONFIG_FILE):
@@ -71,7 +72,7 @@ class BodCyclerGUI(threading.Thread):
                 with open(CONFIG_FILE, "r") as f:
                     loaded_config = json.load(f)
                     self.config.update(loaded_config)
-            except Exception as e:
+            except Exception:
                 pass
         for key in DEFAULT_CONFIG:
             if key not in self.config: self.config[key] = DEFAULT_CONFIG[key]
@@ -92,7 +93,6 @@ class BodCyclerGUI(threading.Thread):
         if "cycle_type" in self.vars:
             self.config["cycle_type"] = self.vars["cycle_type"].get()
             
-        # Save Trade Settings
         if "target_trades" in self.vars:
             try: self.config["trade"]["target_trades"] = int(self.vars["target_trades"].get())
             except: pass
@@ -135,31 +135,38 @@ class BodCyclerGUI(threading.Thread):
         if hx != 0 and hy != 0:
             threading.Thread(target=lambda: newMoveXY(hx, hy, True, 0, True)).start()
 
+    # --- Single Trigger Methods (Manual Testing) ---
     def trigger_supply_check(self):
         self.save_config() 
         ClientPrintEx(Self(), 1, 1, "Starting Supply Check...")
         try:
-            threading.Thread(target=BodCycler_CheckSupplies.check_supplies).start()
-        except NameError:
-            pass
+            import BodCycler_CheckSupplies
+            importlib.reload(BodCycler_CheckSupplies) 
+            threading.Thread(target=BodCycler_CheckSupplies.check_supplies, daemon=True).start()
+        except Exception as e:
+            AddToSystemJournal(f"Failed to load BodCycler_CheckSupplies: {e}")
             
     def trigger_crafting(self):
         self.save_config()
         ClientPrintEx(Self(), 1, 1, "Starting Crafting Engine...")
         try:
-            threading.Thread(target=BodCycler_Crafting.run_crafting_cycle).start()
-        except NameError:
-            AddToSystemJournal("BodCycler_Crafting module not loaded.")
+            import BodCycler_Crafting
+            importlib.reload(BodCycler_Crafting) 
+            threading.Thread(target=BodCycler_Crafting.run_crafting_cycle, daemon=True).start()
+        except Exception as e:
+            AddToSystemJournal(f"Failed to load BodCycler_Crafting: {e}")
 
     def trigger_trade(self):
         self.save_config()
         ClientPrintEx(Self(), 1, 1, "Starting NPC Trade Loop...")
         try:
-            # Assumes BodCycler_NPC_Trade will pull target_trades from the JSON config now
-            threading.Thread(target=BodCycler_NPC_Trade.execute_trade_loop).start()
-        except NameError:
-            AddToSystemJournal("BodCycler_NPC_Trade module not loaded.")
+            import BodCycler_NPC_Trade
+            importlib.reload(BodCycler_NPC_Trade) 
+            threading.Thread(target=BodCycler_NPC_Trade.execute_trade_loop, daemon=True).start()
+        except Exception as e:
+            AddToSystemJournal(f"Failed to load BodCycler_NPC_Trade: {e}")
 
+    # --- Navigation Helpers ---
     def test_travel(self, rune_key_name):
         threading.Thread(target=self._test_travel_thread, args=(rune_key_name,)).start()
 
@@ -181,6 +188,7 @@ class BodCyclerGUI(threading.Thread):
                     NumGumpButton(i, btn_id)
                     return
 
+    # --- Live Dashboard Parsers ---
     def read_supplies_file(self):
         try:
             if os.path.exists(SUPPLY_FILE):
@@ -201,9 +209,33 @@ class BodCyclerGUI(threading.Thread):
         except Exception:
             pass
 
+    def read_stats_file(self):
+        try:
+            if os.path.exists(STATS_FILE):
+                mtime = os.path.getmtime(STATS_FILE)
+                if mtime > self.last_stats_mtime:
+                    with open(STATS_FILE, "r") as f:
+                        data = json.load(f)
+                        self.vars["stat_crafted"].set(f"BODs Filled: {data.get('crafted', 0)}")
+                        self.vars["stat_small"].set(f"Small Prizes: {data.get('prized_small', 0)}")
+                        self.vars["stat_large"].set(f"Large Prizes: {data.get('prized_large', 0)}")
+                    self.last_stats_mtime = mtime
+        except Exception:
+            pass
+
+    def reset_stats(self):
+        empty_stats = {"crafted": 0, "prized_small": 0, "prized_large": 0, "status": STATS["status"]}
+        try:
+            with open(STATS_FILE, "w") as f:
+                json.dump(empty_stats, f)
+            self.read_stats_file()
+        except Exception:
+            pass
+
     def update_timer(self):
         if not self.root: return
         self.read_supplies_file()
+        self.read_stats_file()
         
         if STATS["start_time"]:
             elapsed = datetime.now() - STATS["start_time"]
@@ -213,21 +245,93 @@ class BodCyclerGUI(threading.Thread):
         self.vars["status"].set(f"Status: {STATS['status']}")
         if self.running: self.root.after(1000, self.update_timer)
 
+    # --- ORCHESTRATION: The Master Loop ---
+    def set_global_status(self, status_text):
+        """Updates internal memory and physically writes status to file for worker scripts to read."""
+        STATS["status"] = status_text
+        self.vars["status"].set(f"Status: {status_text}")
+        try:
+            stats_data = {"crafted": 0, "prized_small": 0, "prized_large": 0}
+            if os.path.exists(STATS_FILE):
+                with open(STATS_FILE, "r") as f:
+                    stats_data.update(json.load(f))
+            
+            stats_data["status"] = status_text
+            
+            with open(STATS_FILE, "w") as f:
+                json.dump(stats_data, f, indent=4)
+        except Exception as e:
+            pass
+
+    def master_cycle_thread(self):
+        AddToSystemJournal("=== MASTER CYCLE INITIATED ===")
+        while STATS["status"] != "Stopped":
+            try:
+                # STEP 1: Check Supplies & Maintain Tools
+                if STATS["status"] == "Stopped": break
+                self.set_global_status("Running (Supplies)")
+                ClientPrintEx(Self(), 1, 1, "Master: Checking Supplies...")
+                import BodCycler_CheckSupplies
+                importlib.reload(BodCycler_CheckSupplies)
+                BodCycler_CheckSupplies.check_supplies()
+                
+                # STEP 2: Craft Items & Fill BODs
+                if STATS["status"] == "Stopped": break
+                self.set_global_status("Running (Crafting)")
+                ClientPrintEx(Self(), 1, 1, "Master: Filling BODs...")
+                import BodCycler_Crafting
+                importlib.reload(BodCycler_Crafting)
+                BodCycler_Crafting.run_crafting_cycle()
+                
+                # STEP 3: Travel, Trade, & Return
+                if STATS["status"] == "Stopped": break
+                self.set_global_status("Running (Trading)")
+                ClientPrintEx(Self(), 1, 1, "Master: Commencing NPC Trade...")
+                import BodCycler_NPC_Trade
+                importlib.reload(BodCycler_NPC_Trade)
+                BodCycler_NPC_Trade.execute_trade_loop()
+                
+                # LOOP PAUSE
+                if STATS["status"] == "Stopped": break
+                self.set_global_status("Running (Cooldown)")
+                AddToSystemJournal("Cycle complete. Resting for 5 seconds before repeating...")
+                
+                # Sleep in increments so we can interrupt it instantly if Stop is pressed
+                for _ in range(5):
+                    if STATS["status"] == "Stopped": break
+                    time.sleep(1)
+                
+            except Exception as e:
+                AddToSystemJournal(f"CRITICAL ERROR in Master Cycle: {e}")
+                self.set_global_status("Error (See Journal)")
+                break
+                
+        AddToSystemJournal("=== MASTER CYCLE STOPPED ===")
+
     def start_cycling(self):
+        if STATS["status"] != "Idle" and STATS["status"] != "Stopped" and "Running" in STATS["status"]:
+            AddToSystemJournal("Cycle is already running!")
+            return
+            
         STATS["start_time"] = datetime.now()
-        STATS["status"] = "Running"
+        self.set_global_status("Running")
         self.save_config()
-        # Full Cycle loop placeholder (e.g. check supplies -> craft -> trade -> repeat)
+        
+        # Launch the orchestrator in the background so the GUI doesn't freeze
+        threading.Thread(target=self.master_cycle_thread, daemon=True).start()
 
     def stop_cycling(self):
-        STATS["status"] = "Stopped"
         STATS["start_time"] = None
+        # Writing 'Stopped' to the file will trigger the check_abort() breaks in the worker scripts
+        self.set_global_status("Stopped")
+        ClientPrintEx(Self(), 1, 1, "Cycle Stopped")
+        AddToSystemJournal("User requested cycle stop. Safely aborting scripts...")
 
     def run(self):
         self.load_config()
         self.root = Tk()
         self.root.title(f"{CharName()} - BOD Cycler Config")
-        self.root.geometry("480x950") 
+        self.root.geometry("480x980") 
         self.root.resizable(False, False)
         
         try:
@@ -344,22 +448,36 @@ class BodCyclerGUI(threading.Thread):
             r_col += 3
             if r_col > 5: r_col=0; r_row+=1
 
-        # 4. Dashboard
-        lf_stats = LabelFrame(self.root, text="Status", padx=5, pady=5)
+        # 4. Dashboard (Stats & Info)
+        lf_stats = LabelFrame(self.root, text="Live Stats Dashboard", padx=5, pady=5)
         lf_stats.pack(fill="x", padx=10, pady=10)
+        
+        self.vars["stat_crafted"] = StringVar(value="BODs Filled: 0")
+        self.vars["stat_small"] = StringVar(value="Small Prizes: 0")
+        self.vars["stat_large"] = StringVar(value="Large Prizes: 0")
+        
+        f_metric = Frame(lf_stats)
+        f_metric.pack(fill="x", pady=2)
+        Label(f_metric, textvariable=self.vars["stat_crafted"], fg="darkblue", font=("Arial", 10, "bold")).pack(side=LEFT, expand=True)
+        Label(f_metric, textvariable=self.vars["stat_small"], fg="darkgreen", font=("Arial", 10, "bold")).pack(side=LEFT, expand=True)
+        Label(f_metric, textvariable=self.vars["stat_large"], fg="darkmagenta", font=("Arial", 10, "bold")).pack(side=LEFT, expand=True)
+        
+        Button(lf_stats, text="Reset Stats", command=self.reset_stats, font=("Arial", 8)).pack(pady=4)
+
         self.vars["timer"] = StringVar(value="Time: 00:00:00")
         self.vars["status"] = StringVar(value="Status: Idle")
-        Label(lf_stats, textvariable=self.vars["status"], font=("Arial", 12)).pack()
-        Label(lf_stats, textvariable=self.vars["timer"], font=("Courier", 12)).pack()
+        Label(lf_stats, textvariable=self.vars["status"], font=("Arial", 11, "bold")).pack(pady=(5,0))
+        Label(lf_stats, textvariable=self.vars["timer"], font=("Courier", 10)).pack()
 
         # 5. Controls
         f_ctl = Frame(self.root, pady=10)
         f_ctl.pack()
         Button(f_ctl, text="Save", command=self.save_config, bg="#DDD", width=10).pack(side=LEFT, padx=5)
-        Button(f_ctl, text="START CYCLE", command=self.start_cycling, bg="green", fg="white", width=12).pack(side=LEFT, padx=5)
-        Button(f_ctl, text="Stop", command=self.stop_cycling, bg="red", fg="white", width=10).pack(side=LEFT, padx=5)
+        Button(f_ctl, text="START CYCLE", command=self.start_cycling, bg="green", fg="white", font=("Arial", 9, "bold"), width=14).pack(side=LEFT, padx=5)
+        Button(f_ctl, text="Stop", command=self.stop_cycling, bg="red", fg="white", font=("Arial", 9, "bold"), width=10).pack(side=LEFT, padx=5)
 
         self.read_supplies_file()
+        self.read_stats_file()
         self.update_timer()
         self.root.mainloop()
 

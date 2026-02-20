@@ -2,7 +2,7 @@
 # Updated with the latest shard-specific Hex IDs provided by the user
 TAILOR_ITEMS = {
     "bandana": ("Hats", "bandana", 0x1540, 2),
-    "skullcap": ("Hats", "skullcap", 0x1508, 2),
+    "skullcap": ("Hats", "skullcap", 0x1544, 2),
     "floppy hat": ("Hats", "floppy hat", 0x1713, 11),
     "cap": ("Hats", "cap", 0x1715, 11),
     "wide-brim hat": ("Hats", "wide-brim hat", 0x1714, 14),
@@ -19,7 +19,7 @@ TAILOR_ITEMS = {
     "fancy shirt": ("Shirts", "fancy shirt", 0x1EBF, 8),
     "tunic": ("Shirts", "tunic", 0x1FA1, 12),
     "surcoat": ("Shirts", "surcoat", 0x1FFD, 14),
-    "plain dress": ("Shirts", "plain dress", 0x1F4B, 10),
+    "plain dress": ("Shirts", "plain dress", 0x1F01, 10),
     "fancy dress": ("Shirts", "fancy dress", 0x1F4C, 12),
     "cloak": ("Shirts", "cloak", 0x1557, 14),
     "robe": ("Shirts", "robe", 0x1F4D, 16),

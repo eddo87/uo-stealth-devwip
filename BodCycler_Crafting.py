@@ -30,12 +30,46 @@ BOOK_GUMP_ID = 0x54F555DF
 CRAFT_GUMP_ID = 0x38920abd
 
 CONFIG_FILE = f"{StealthPath()}Scripts\\{CharName()}_bodcycler_config.json"
+STATS_FILE = f"{StealthPath()}Scripts\\{CharName()}_bodcycler_stats.json"
 
 def load_config():
     if os.path.exists(CONFIG_FILE):
         with open(CONFIG_FILE, "r") as f:
             return json.load(f)
     return None
+
+def check_abort():
+    """Checks the stats file to see if the GUI requested a hard stop."""
+    if os.path.exists(STATS_FILE):
+        try:
+            with open(STATS_FILE, "r") as f:
+                data = json.load(f)
+                if data.get("status") == "Stopped":
+                    return True
+        except:
+            pass
+    return False
+
+def update_stats(crafted=0, prized_small=0, prized_large=0):
+    """Updates the persistent stats JSON file for the GUI to read."""
+    stats = {"crafted": 0, "prized_small": 0, "prized_large": 0}
+    
+    if os.path.exists(STATS_FILE):
+        try:
+            with open(STATS_FILE, "r") as f:
+                stats.update(json.load(f))
+        except Exception:
+            pass
+            
+    stats["crafted"] += crafted
+    stats["prized_small"] += prized_small
+    stats["prized_large"] += prized_large
+    
+    try:
+        with open(STATS_FILE, "w") as f:
+            json.dump(stats, f, indent=4)
+    except Exception as e:
+        AddToSystemJournal(f"Failed to save stats: {e}")
 
 def close_all_gumps():
     """Closes all open gumps to ensure a clean UI state."""
@@ -257,11 +291,13 @@ def check_and_pull_materials(material, qty_to_craft, item_cost, crate_serial):
         Wait(1000)
     
     for t in mat_types:
+        if check_abort(): return False
         FindTypeEx(t, mat_color, crate_serial, False)
         found_stacks = GetFoundList()
         
         # Keep pulling stacks until we have what we need
         for stack in found_stacks:
+            if check_abort(): return False
             world_save_guard()
             
             # Re-check current backpack quantity dynamically
@@ -289,6 +325,7 @@ def recycle_invalid_items(item_id, is_except, tool_type):
     FindType(item_id, Backpack())
     items = GetFoundList()
     for it in items:
+        if check_abort(): break
         tt = GetTooltip(it).lower()
         if is_except and "exceptional" not in tt:
             world_save_guard()
@@ -309,6 +346,11 @@ def craft_items_until_done(tool_type, cat_text, item_text, item_id, qty_needed, 
     attempts = 0
     
     while made_valid < qty_needed and attempts < (qty_needed * 3):
+        # Abort check inside the main crafting loop!
+        if check_abort(): 
+            AddToSystemJournal("Abort detected. Stopping tool crafting.")
+            return False
+            
         world_save_guard()
         attempts += 1
         
@@ -412,6 +454,11 @@ def fill_bod_completely(bod_serial, item_id, qty_to_fill, item_name, is_except):
 
     # 2. Iterate through valid items, shoving them into the BOD until full
     for item in valid_items:
+        # Abort check inside target loop
+        if check_abort(): 
+            AddToSystemJournal("Abort detected. Stopping BOD filling.")
+            break
+            
         # If target drops (start of loop, server lag, or BOD became full)
         if not TargetPresent():
             # Check if it actually finished before bothering to reopen gump
@@ -441,8 +488,8 @@ def fill_bod_completely(bod_serial, item_id, qty_to_fill, item_name, is_except):
         if TargetPresent():
             world_save_guard()
             TargetToObject(item)
-            Wait(500) # Small pause for packet
-            WaitForTarget(2000) # Wait for the *recurring* cursor
+            Wait(100) # Tiny pause for packet delivery
+            WaitForTarget(600) # Extremely snappy recurring cursor wait
             
     # Clean up leftover target
     if TargetPresent(): 
@@ -459,6 +506,10 @@ def run_crafting_cycle():
     conserva = config['books']['Conserva']; scartare = config['books']['Scartare']
     riprova = config['books']['Riprova']; crate = config['containers']['MaterialCrate']
     
+    session_crafted = 0
+    session_small = 0
+    session_large = 0
+    
     AddToSystemJournal("=== Starting Crafting Cycle ===")
     
     # Initialize crate contents for PyStealth caching at the start of the macro
@@ -467,14 +518,35 @@ def run_crafting_cycle():
         Wait(1000)
         
     for i in range(BODS_TO_PROCESS):
-        close_all_gumps(); consolidate_cloth(crate)
-        bod = extract_bod_from_origine(origine)
-        if bod == 0: AddToSystemJournal("Origine book is empty."); break
+        # Master abort check for the main loop
+        if check_abort():
+            AddToSystemJournal("Cycle Abort requested. Safely halting Crafting Cycle.")
+            break
+            
+        close_all_gumps()
+        consolidate_cloth(crate)
+        
+        # Crash Recovery Hook: Check if a BOD is already in the bag
+        FindType(BOD_TYPE, Backpack())
+        if FindCount() > 0:
+            bod = FindItem()
+            AddToSystemJournal(f"Found existing BOD in backpack (Recovery Mode): {hex(bod)}")
+        else:
+            bod = extract_bod_from_origine(origine)
+            if bod == 0: 
+                AddToSystemJournal("Origine book is empty.")
+                break
             
         info = parse_bod(bod)
+        
+        # Determine Route & Log Stats
         if info['qty_needed'] <= 0:
             AddToSystemJournal(f"BOD {info['item_name']} already full.")
-            MoveItem(bod, 0, consegna, 0,0,0); continue
+            dest = conserva if (info['prize_id'] and info['prize_id'] > 0) else consegna
+            if dest == conserva:
+                if info['is_large']: session_large += 1
+                else: session_small += 1
+            MoveItem(bod, 0, dest, 0,0,0); continue
 
         p_status = f"PRIZE {info['prize_id']}" if info['prize_id'] else "TRASH"
         AddToSystemJournal(f"BOD: {info['item_name']} (Needed: {info['qty_needed']}/{info['qty_total']}) [{p_status}]")
@@ -482,6 +554,9 @@ def run_crafting_cycle():
         if info['material'] == "bone" or info['is_large']:
             # Safe check for NoneType prize_id
             dest = conserva if (info['prize_id'] and info['prize_id'] > 0) else scartare
+            if dest == conserva:
+                if info['is_large']: session_large += 1
+                else: session_small += 1
             MoveItem(bod, 0, dest, 0,0,0); Wait(1000); continue
             
         cat_text, item_text, item_id, tool_type, item_cost = get_craft_info(info['item_name'])
@@ -505,10 +580,19 @@ def run_crafting_cycle():
             
         is_full = fill_bod_completely(bod, item_id, info['qty_needed'], info['item_name'], info['is_except'])
         
-        # FIXED: Use logical and to guard against NoneType prize_id comparison
-        dest = (conserva if info['prize_id'] and info['prize_id'] > 0 else consegna) if is_full else riprova
+        if is_full:
+            session_crafted += 1
+            dest = conserva if (info['prize_id'] and info['prize_id'] > 0) else consegna
+            if dest == conserva:
+                if info['is_large']: session_large += 1
+                else: session_small += 1
+        else:
+            dest = riprova
+            
         MoveItem(bod, 0, dest, 0,0,0); Wait(1000)
 
+    # Save progress to JSON so the GUI can see it
+    update_stats(session_crafted, session_small, session_large)
     AddToSystemJournal("=== Crafting Cycle Complete ===")
 
 if __name__ == '__main__':
