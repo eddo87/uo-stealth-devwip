@@ -1,46 +1,59 @@
 {
   "project": "Stealth Client BOD Cycler",
-  "status": "Active Development - Config & Supplies Completed",
+  "status": "Beta - Full Cycle Master Orchestration Achieved",
   "key_learnings": [
     "Stealth API: Use FindCount() not GetFindCount()",
     "Stealth API: CloseSimpleGump must be iterated backwards",
     "Gump Parsing: 'Amount' field is plain text (GumpText), others are HTML (XmfHTMLGumpColor)",
     "Parsing Strategy: Group by Y-coordinate (Row) then identify by X-coordinate (Column)",
     "Large BOD Fix: Large BODs may visually report '0' amount; logic must 'steal' correct quantity from child components",
-    "Material Inference: Small BODs often lack visual Material text (defaulting to Iron); logic must infer 'Leather' or 'Cloth' based on item type",
-    "Visual Tolerance: Increased Y-axis tolerance (10px) is required to correctly group Amount text with Item names",
-    "Tkinter UI: Tkinter must run in the main thread (using .run() / .mainloop()), not as a daemon thread, to avoid immediate termination.",
-    "Inter-script Communication: The GUI and worker scripts communicate seamlessly by reading/writing to local JSON files (config and supplies).",
-    "Crafting Gump IDs: Shard specific button IDs verified via diagnostic script -> Tinker Tools (23), Sewing Kit (44), Tongs (16).",
+    "Tkinter UI: Tkinter must run in the main thread. Heavy macro logic must run in background threads (daemon=True) to prevent freezing.",
+    "Hot-Reloading: Use importlib.reload(module) before executing scripts from the GUI to allow live code edits without restarting the UI.",
+    "Inter-script Communication: The GUI and worker scripts communicate seamlessly by reading/writing to local JSON files (config, supplies, and stats/status).",
+    "Cross-Script Abort: A 'Stopped' status written to JSON by the GUI is polled via check_abort() in inner loops to cleanly halt executing macros.",
     "Crafting Reliability: Using a text/Cliloc search within the gump (text_in_gump) is much safer than blind waits and button presses.",
+    "Crafting Pacing: Replicating UO Assist/Razor delays -> Click 'Make Last' -> Wait(600) -> Wait dynamically for gump to reappear (up to 5s).",
     "World Save Guard: checkWorldSave.py's world_save_guard() must be called inside all 'Wait()' loops, movement loops, and crafting loops to prevent stalling.",
-    "Material IDs & Hues: Cloth uses both 0x1766 and 0x1767. Leather (0x1081) uses specific hues: Normal (0x0000), Spined (0x08AC), Horned (0x0845), Barbed (0x0851)."
+    "Material IDs & Hues: Cloth uses both 0x1766 and 0x1767. Leather (0x1081) uses specific hues: Normal (0x0000), Spined (0x08AC), Horned (0x0845), Barbed (0x0851).",
+    "NPC Context Menus: SetContextMenuHook(npc, id) MUST be immediately followed by RequestContextMenu(npc). Pauses between them break the hook.",
+    "NPC Buying: AutoBuy(Type, Color, Qty) establishes the buy list. Use a list of fallback IDs (e.g., [0x0F95, 0x0F97, 0x0F9B, 0x0F9C]) if shards vary.",
+    "Runebook Matrix: Button ID calculation is offset + (rune_index - 1) * 6. (Offset is 5 for Recall, 7 for Sacred Journey)."
   ],
   "files": [
     {
       "filename": "bod_data.py",
-      "description": "Contains definitions for Target Sets (Male/Female/Studded/Crier), filtered Reward dictionary (IDs 23 & 24), and component lists.",
+      "description": "Contains definitions for Target Sets, filtered Reward dictionary, and component lists.",
       "content": "Updated with specific Tailor sets and logic to ignore non-target rewards."
     },
     {
+      "filename": "bod_crafting_data.py",
+      "description": "Smart mapping of item names to Category, ItemName, GraphicID, and ResourceCost.",
+      "content": "Updated with verified shard-specific hex IDs."
+    },
+    {
       "filename": "gemini_BodScanner.py",
-      "description": "Main scanner script. Features 2-pass parsing (Raw -> Final), material inference, and a 'Set Progress Report' that calculates potential full sets from inventory.",
-      "content": "See Script code"
+      "description": "Main scanner script. Features 2-pass parsing (Raw -> Final), material inference, and a 'Set Progress Report'.",
+      "content": "Analyzes backpacks to see if full sets can be made."
     },
     {
       "filename": "BodCycler_Config.py",
-      "description": "Tkinter GUI for setting target serials (5 books, crate, dye tub, runebook), saving home coordinates, and testing travel routes.",
-      "content": "Generates [CharName]_bodcycler_config.json. Displays live resource dashboard by reading from supplies JSON."
+      "description": "The Command Center. Tkinter GUI for setting target serials, saving home coordinates, testing travel routes, and running the Master Cycle.",
+      "content": "Generates config JSONs, reads live stats/supplies, manages hot-reloaded daemon threads, and writes global abort states."
     },
     {
       "filename": "BodCycler_CheckSupplies.py",
-      "description": "Maintenance script to audit and craft required tools based on 'Tailor' or 'Smith' mode. Restocks ingots and manages tool counts in backpack vs crate.",
-      "content": "Outputs material counts to [CharName]_bodcycler_supplies.json for the GUI. Secured with world_save_guard()."
+      "description": "Maintenance script to audit and craft required tools based on 'Tailor' or 'Smith' mode. Restocks ingots and manages tool counts.",
+      "content": "Outputs material counts to supplies JSON for the GUI dashboard. Secured with world_save_guard() and dynamic gump text parsing."
     },
     {
-      "filename": "BodCycler_DebugCraft.py",
-      "description": "Diagnostic tool used to parse a gump's HTML/Clilocs and find the exact X/Y coordinates and ReturnValue buttons for specific text.",
-      "content": "Used once to map the correct Tinkering menu buttons for this specific shard."
+      "filename": "BodCycler_Crafting.py",
+      "description": "Intelligently extracts BODs, checks missing quantities, pulls needed materials from the crate, crafts items cleanly, and fills the BOD.",
+      "content": "Includes tooltip lag workarounds, crash recovery (checking bag for existing BODs), aggressive UI clearing, and JSON stat tracking."
+    },
+    {
+      "filename": "BodCycler_NPC_Trade.py",
+      "description": "Handles the core trade cycle. Drops Consegna BODs onto Tailor, accepts new BODs, files them to Origine, buys cloth bolts using fallbacks, cuts them, and recalls home.",
+      "content": "Uses SetContextMenuHook to trigger NPC interactions, AutoBuy logic with fallback IDs, and backup location recalls."
     }
   ]
 }
