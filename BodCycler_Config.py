@@ -23,6 +23,16 @@ try:
 except ImportError:
     pass
 
+try:
+    import BodCycler_Scanner
+except ImportError:
+    pass
+
+try:
+    import BodCycler_Assembler
+except ImportError:
+    pass
+
 # --- Configuration & Globals ---
 CONFIG_FILE = f"{StealthPath()}Scripts\\{CharName()}_bodcycler_config.json"
 SUPPLY_FILE = f"{StealthPath()}Scripts\\{CharName()}_bodcycler_supplies.json"
@@ -166,6 +176,26 @@ class BodCyclerGUI(threading.Thread):
         except Exception as e:
             AddToSystemJournal(f"Failed to load BodCycler_NPC_Trade: {e}")
 
+    def trigger_scan(self):
+        self.save_config()
+        ClientPrintEx(Self(), 1, 1, "Scanning Conserva Book...")
+        try:
+            import BodCycler_Scanner
+            importlib.reload(BodCycler_Scanner) 
+            threading.Thread(target=BodCycler_Scanner.run_scanner, daemon=True).start()
+        except Exception as e:
+            AddToSystemJournal(f"Failed to load BodCycler_Scanner: {e}")
+
+    def trigger_assemble(self):
+        self.save_config()
+        ClientPrintEx(Self(), 1, 1, "Assembling Large BODs...")
+        try:
+            import BodCycler_Assembler
+            importlib.reload(BodCycler_Assembler) 
+            threading.Thread(target=BodCycler_Assembler.run_assembler, daemon=True).start()
+        except Exception as e:
+            AddToSystemJournal(f"Failed to load BodCycler_Assembler: {e}")
+
     # --- Navigation Helpers ---
     def test_travel(self, rune_key_name):
         threading.Thread(target=self._test_travel_thread, args=(rune_key_name,)).start()
@@ -294,10 +324,10 @@ class BodCyclerGUI(threading.Thread):
                 # LOOP PAUSE
                 if STATS["status"] == "Stopped": break
                 self.set_global_status("Running (Cooldown)")
-                AddToSystemJournal("Apre il pacchetto, prende una sigaretta e l'accende...")
+                AddToSystemJournal("Cycle complete. Resting for 5 seconds before repeating...")
                 
                 # Sleep in increments so we can interrupt it instantly if Stop is pressed
-                for _ in range(3):
+                for _ in range(5):
                     if STATS["status"] == "Stopped": break
                     time.sleep(1)
                 
@@ -350,9 +380,10 @@ class BodCyclerGUI(threading.Thread):
         Radiobutton(f_type, text="Smith", variable=self.vars["cycle_type"], value="Smith").pack(side=LEFT)
         
         # Action Buttons
-        Button(f_type, text="Trade", command=self.trigger_trade, bg="#90EE90").pack(side=RIGHT, padx=2)
-        Button(f_type, text="Craft", command=self.trigger_crafting, bg="#FFD700").pack(side=RIGHT, padx=2)
-        Button(f_type, text="Supply", command=self.trigger_supply_check, bg="#ADD8E6").pack(side=RIGHT, padx=2)
+        Button(f_type, text="Trade", command=self.trigger_trade, bg="#90EE90").pack(side=RIGHT, padx=1)
+        Button(f_type, text="Craft", command=self.trigger_crafting, bg="#FFD700").pack(side=RIGHT, padx=1)
+        Button(f_type, text="Assemble", command=self.trigger_assemble, bg="#DDA0DD").pack(side=RIGHT, padx=1)
+        Button(f_type, text="Scan", command=self.trigger_scan, bg="#FFB6C1").pack(side=RIGHT, padx=1)
 
         # Configurable Variables for Trading
         f_trade_vars = Frame(lf_log)
