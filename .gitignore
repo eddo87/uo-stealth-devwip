@@ -15,6 +15,10 @@ stats.json
 supplies.json
 config.json
 
+#Custom Debug Prefix (Ignores all files/folders starting with _debug)
+_debug*
+_bk_*
+
 # OS Specific
 .DS_Store
 Thumbs.db

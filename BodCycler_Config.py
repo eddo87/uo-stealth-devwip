@@ -294,10 +294,10 @@ class BodCyclerGUI(threading.Thread):
                 # LOOP PAUSE
                 if STATS["status"] == "Stopped": break
                 self.set_global_status("Running (Cooldown)")
-                AddToSystemJournal("Cycle complete. Resting for 5 seconds before repeating...")
+                AddToSystemJournal("Apre il pacchetto, prende una sigaretta e l'accende...")
                 
                 # Sleep in increments so we can interrupt it instantly if Stop is pressed
-                for _ in range(5):
+                for _ in range(3):
                     if STATS["status"] == "Stopped": break
                     time.sleep(1)
                 
