@@ -321,6 +321,14 @@ class BodCyclerGUI(threading.Thread):
                 importlib.reload(BodCycler_NPC_Trade)
                 BodCycler_NPC_Trade.execute_trade_loop()
                 
+                # STEP 4: Assemble Large BODs from Conserva
+                if STATS["status"] == "Stopped": break
+                self.set_global_status("Running (Assembling)")
+                ClientPrintEx(Self(), 1, 1, "Master: Assembling Sets...")
+                import BodCycler_Assembler
+                importlib.reload(BodCycler_Assembler)
+                BodCycler_Assembler.run_assembler()
+                
                 # LOOP PAUSE
                 if STATS["status"] == "Stopped": break
                 self.set_global_status("Running (Cooldown)")
