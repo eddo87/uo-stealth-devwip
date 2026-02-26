@@ -18,6 +18,7 @@ config.json
 #Custom Debug Prefix (Ignores all files/folders starting with _debug)
 _debug*
 _bk_*
+_bk_zzz/
 
 # OS Specific
 .DS_Store

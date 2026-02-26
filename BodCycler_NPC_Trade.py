@@ -3,7 +3,9 @@ import json
 import os
 import time
 from datetime import datetime
+from bod_data import *
 
+import BodCycler_Crafting
 try:
     from checkWorldSave import world_save_guard
 except ImportError:
@@ -47,7 +49,6 @@ def load_config():
     return None
 
 def check_abort():
-    """Checks the stats file to see if the GUI requested a hard stop."""
     if os.path.exists(STATS_FILE):
         try:
             with open(STATS_FILE, "r") as f:
@@ -59,7 +60,6 @@ def check_abort():
     return False
 
 def close_all_gumps():
-    """Closes all open gumps to ensure a clean UI state."""
     count = GetGumpsCount()
     if count > 0:
         for i in reversed(range(count)):
@@ -67,11 +67,8 @@ def close_all_gumps():
         Wait(500)
 
 def find_tailor():
-    """Scans screen for an NPC, prioritizing 'weaver' over 'tailor'."""
-    SetFindDistance(10) # Open up the search range to 10 tiles
-    
-    weavers = []
-    tailors = []
+    SetFindDistance(10) 
+    weavers, tailors = [], []
     
     for npc_type in NPC_TYPES:
         FindTypeEx(npc_type, 0xFFFF, Ground(), False)
@@ -83,51 +80,96 @@ def find_tailor():
             elif 'tailor' in name or 'tailor' in title:
                 tailors.append(npc)
                 
-    # Prioritize weavers since they sell cloth bolts reliably
-    if weavers:
-        return weavers[0]
-    if tailors:
-        return tailors[0]
-        
+    if weavers: return weavers[0]
+    if tailors: return tailors[0]
     return 0
 
 def move_to_npc(npc):
-    """Ensures character is next to the NPC before interacting."""
     if npc > 0 and GetDistance(npc) > 1:
         newMoveXY(GetX(npc), GetY(npc), False, 1, True)
         Wait(500)
 
-def move_bods_to_origine(origine_book_serial):
-    """Moves any loose BODs in the backpack (newly received) into the Origine book."""
-    if origine_book_serial == 0:
-        AddToSystemJournal("Origine book not set, skipping BOD filing.")
-        return
-        
-    FindType(BOD_TYPE, Backpack())
-    loose_bods = GetFoundList()
+def sort_new_bods(config):
+    """Smart Sorter: Small -> Origine | Valuable Large -> Conserva | Junk Large -> Scartare."""
+    origine_serial = config.get("books", {}).get("Origine", 0)
+    conserva_serial = config.get("books", {}).get("Conserva", 0)
+    scartare_serial = config.get("books", {}).get("Scartare", 0)
     
-    if len(loose_bods) > 0:
-        AddToSystemJournal(f"Filing {len(loose_bods)} new BOD(s) into Origine book...")
-        for bod in loose_bods:
-            world_save_guard()
-            MoveItem(bod, 0, origine_book_serial, 0, 0, 0)
+    FindType(BOD_TYPE, Backpack())
+    loose_bods = list(GetFoundList())
+    
+    if not loose_bods: return
+        
+    AddToSystemJournal(f"Sorting {len(loose_bods)} new BOD(s) from Backpack...")
+    
+    for bod in loose_bods:
+        world_save_guard()
+        
+        # We rely on the central parse_bod logic from bod_data to perfectly identify the BOD properties!
+        info = BodCycler_Crafting.parse_bod(bod)
+        
+        dest_book = 0
+        dest_name = ""
+        parsed_bod = None
+        
+        if not info or info.get('item_name') == "Unknown":
+            AddToSystemJournal(f"WARNING: Failed to parse BOD {hex(bod)}. Routing to Scartare for safety.")
+            if scartare_serial != 0:
+                dest_book = scartare_serial
+                dest_name = "Scartare"
+        elif info.get('is_large'):
+            # STRICT SCARTARE LOGIC (Identical to Crafting script using prize_id)
+            # AddToSystemJournal(info) # Debug
+            is_scartare = False
+            if info.get('material', '').lower() == "bone":
+                is_scartare = True
+            elif info.get('prize_id') not in [23, 24]:
+                is_scartare = True
+                
+            if not is_scartare and conserva_serial != 0:
+                dest_book = conserva_serial
+                dest_name = "Conserva"
+                
+                # Format exactly what the Assembler expects
+                parsed_bod = {
+                    "type": "Large",
+                    "item": info['item_name'].lower(),
+                    "quality": "Exceptional" if info.get('is_except') else "Normal",
+                    "material": info.get('material', 'Iron'),
+                    "amount": info.get('qty_needed', 20),
+                    "category": info['item_name'] # For Large BODs, item_name equates to the Category Set
+                }
+            elif scartare_serial != 0:
+                dest_book = scartare_serial
+                dest_name = "Scartare"
+        else:
+            # Small BODs go to Origine to be crafted
+            if origine_serial != 0:
+                dest_book = origine_serial
+                dest_name = "Origine"
+                
+        if dest_book != 0:
+            AddToSystemJournal(f"Routing BOD to {dest_name} book...")
+            MoveItem(bod, 0, dest_book, 0, 0, 0)
             Wait(1000)
             
-        # CRITICAL FIX: The shard auto-opens the book gump when dropping items into it.
-        # We must close it here, otherwise it blocks the Consegna book extraction!
+            # --- PERFECT STATE MANAGEMENT ---
+            if dest_name == "Conserva" and parsed_bod:
+                try:
+                    import BodCycler_Assembler
+                    BodCycler_Assembler.append_to_inventory(parsed_bod)
+                except Exception as e:
+                    AddToSystemJournal(f"Failed to push BOD to Assembler JSON: {e}")
+                
         close_all_gumps()
 
 def extract_bod_from_book(book_serial):
-    """Opens the Consegna book and drops the first BOD into the backpack."""
-    # Extra safety: wipe UI state before attempting to open the book
     close_all_gumps()
-    
     FindType(BOD_TYPE, Backpack())
     before_bods = GetFoundList()
     
     UseObject(book_serial)
     
-    # Wait for book gump
     t = time.time()
     found_idx = -1
     while time.time() - t < 3:
@@ -139,50 +181,32 @@ def extract_bod_from_book(book_serial):
         if found_idx != -1: break
         Wait(100) 
         
-    if found_idx == -1:
-        AddToSystemJournal("Failed to open Consegna book.")
-        return 0
+    if found_idx == -1: return 0
         
-    # Press the drop button for the first BOD
     NumGumpButton(found_idx, BTN_DROP_BOD_1)
     Wait(1500) 
-    
-    # Close the book gump so it doesn't block the next iteration!
     CloseSimpleGump(found_idx)
     Wait(500)
     
-    # Find the newly dropped BOD
     FindType(BOD_TYPE, Backpack())
     after_bods = GetFoundList()
     new_bods = [b for b in after_bods if b not in before_bods]
-    if new_bods: 
-        return new_bods[0]
-        
-    AddToSystemJournal("DEBUG: Clicked drop, but no new BOD appeared in backpack.")
+    if new_bods: return new_bods[0]
     return 0
 
 def trade_bod(npc, bod_serial):
-    """Drags and drops the filled BOD onto the NPC."""
     if bod_serial == 0: return False
-    
     world_save_guard()
     move_to_npc(npc)
-    
-    AddToSystemJournal("Dropping filled BOD on NPC...")
     MoveItem(bod_serial, 1, npc, 0, 0, 0)
     Wait(2000) 
     return True
 
 def find_bod_offer_gump():
-    """Dynamically looks for the BOD offer gump by ID or Cliloc."""
     for i in range(GetGumpsCount()):
         g = GetGumpInfo(i)
-        
-        # Method 1: Check known Gump IDs (Small and Large)
         if g.get('GumpID') in [BOD_GUMP_ID_SMALL, BOD_GUMP_ID_LARGE]:
             return i
-            
-        # Method 2: Check for specific Cliloc text (Ah! Thanks for the goods!)
         if 'XmfHTMLGumpColor' in g:
             for entry in g['XmfHTMLGumpColor']:
                 if entry.get('ClilocID') == 1045135:
@@ -190,15 +214,11 @@ def find_bod_offer_gump():
     return -1
 
 def request_new_bod(npc):
-    """Requests a new BOD from the NPC and accepts it."""
     world_save_guard()
     move_to_npc(npc)
-    
-    AddToSystemJournal("Requesting new BOD...")
     SetContextMenuHook(npc, CTX_BOD)
     RequestContextMenu(npc)
     
-    # Wait for the BOD offer gump
     t = time.time()
     found_idx = -1
     while time.time() - t < 3:
@@ -209,44 +229,27 @@ def request_new_bod(npc):
         
     if found_idx != -1:
         NumGumpButton(found_idx, BTN_ACCEPT_BOD)
-        AddToSystemJournal("BOD Accepted.")
         Wait(1200) 
-    else:
-        AddToSystemJournal("No BOD offered (Timer active or invalid context menu ID).")
 
 def buy_and_cut_cloth(npc, amount=80):
-    """Sets AutoBuy for Bolts of Cloth, buys them with fallbacks, and cuts them."""
-    AddToSystemJournal(f"Starting cloth buy sequence for {amount} bolts...")
     world_save_guard()
     move_to_npc(npc)
     
-    # Safely clear the buy list
     try: ClearAutoBuy()
-    except NameError: pass
+    except: pass
     try: ClearBuyList()
-    except NameError: pass
+    except: pass
     try: ClearBuy()
-    except NameError: pass
+    except: pass
 
     bought_any = False
-    
-    # Loop through the known bolt of cloth IDs to find the one this vendor sells
     for bolt_id in BOLT_OF_CLOTH_IDS:
         if check_abort(): return
-        
-        if bought_any:
-            break
+        if bought_any: break
             
-        AddToSystemJournal(f"Attempting to buy Bolts using ID: {hex(bolt_id)}...")
-        
-        # Setup AutoBuy
-        try:
-            AutoBuy(bolt_id, 0xFFFF, amount) # set buy hook
-        except NameError:
-            AddToSystemJournal("AutoBuy function missing in PyStealth! Skipping cloth purchase.")
-            return
+        try: AutoBuy(bolt_id, 0xFFFF, amount)
+        except: return
             
-        # Trigger Buy Menu via Context Menu exactly as requested
         world_save_guard()
         SetContextMenuHook(npc, CTX_BUY)
         Wait(500)
@@ -254,61 +257,40 @@ def buy_and_cut_cloth(npc, amount=80):
         RequestContextMenu(npc)
         Wait(1500)
         
-        # Clean up AutoBuy / unset buy hook
         try: 
             AutoBuy(bolt_id, 0xFFFF, 0)
             ClearAutoBuy()
-        except NameError: 
-            pass
+        except: pass
             
-        # Check if we actually bought them
         FindType(bolt_id, Backpack())
-        if FindCount() > 0:
-            bought_any = True
-            AddToSystemJournal(f"Success! Bought cloth with ID {hex(bolt_id)}.")
+        if FindCount() > 0: bought_any = True
             
-    if not bought_any:
-        AddToSystemJournal("No bolts found in backpack. All fallback IDs failed.")
-        return
+    if not bought_any: return
     
-    # Cut Cloth
     FindType(SCISSORS, Backpack())
-    if FindCount() == 0:
-        AddToSystemJournal("WARNING: No scissors found to cut the cloth!")
-        return
-        
+    if FindCount() == 0: return
     scissors = FindItem()
     
-    # We must cut any bolt ID that exists in the backpack
     for bolt_id in BOLT_OF_CLOTH_IDS:
         if check_abort(): return
-        
         FindType(bolt_id, Backpack())
         bolts = GetFoundList()
         
-        if len(bolts) > 0:
-            AddToSystemJournal(f"Cutting {len(bolts)} bolt stacks of ID {hex(bolt_id)}...")
-            for bolt in bolts:
-                if check_abort(): return
-                world_save_guard()
-                UseObject(scissors)
-                WaitForTarget(2000)
-                TargetToObject(bolt)
-                Wait(700)
-                
-    AddToSystemJournal("Cloth cutting complete.")
+        for bolt in bolts:
+            if check_abort(): return
+            world_save_guard()
+            UseObject(scissors)
+            WaitForTarget(2000)
+            TargetToObject(bolt)
+            Wait(700)
 
 def travel_to(runebook_serial, travel_method, rune_index):
-    """Uses Runebook to travel to a specific spot. Returns True if position changed."""
     if runebook_serial == 0: return False
-    
     start_x = GetX(Self())
     start_y = GetY(Self())
     
-    AddToSystemJournal(f"Traveling to Rune {rune_index} via {travel_method}...")
     offset = 5 if travel_method == "Recall" else 7
     btn_id = offset + (rune_index - 1) * 6
-    
     UseObject(runebook_serial)
     
     t = time.time()
@@ -323,166 +305,109 @@ def travel_to(runebook_serial, travel_method, rune_index):
         if gump_pressed: break
         Wait(100) 
         
-    if not gump_pressed:
-        AddToSystemJournal("Failed to open runebook.")
-        return False
+    if not gump_pressed: return False
         
-    # Wait up to 6 seconds for coordinates to change
     t = time.time()
     while time.time() - t < 6:
         world_save_guard()
         if abs(GetX(Self()) - start_x) > 5 or abs(GetY(Self()) - start_y) > 5:
-            Wait(1000) # Give environment an extra second to load 
+            Wait(1000) 
             return True
         Wait(100)
-        
-    AddToSystemJournal("Did not detect movement. (Fizzle, blocked, or already there).")
     return False
 
 def process_prizes_at_home(trash_serial, crate_serial, dye_tub_serial):
-    """Handles trashing junk and dyeing/storing cloth rewards."""
-    AddToSystemJournal("Processing Prizes at Home...")
-
-    # 1. Trash Oil Cloth and Sandals
     if trash_serial != 0:
         for junk_type in [OIL_CLOTH, SANDALS]:
             FindType(junk_type, Backpack())
             for junk in GetFoundList():
                 if check_abort(): return
                 world_save_guard()
-                AddToSystemJournal(f"Trashing junk item: {hex(junk)}")
                 MoveItem(junk, 0, trash_serial, 0, 0, 0)
                 Wait(800)
-    else:
-        AddToSystemJournal("Trash Barrel not set in Config. Skipping trashing.")
 
-    # 2. Dye and Store Cloth
     if crate_serial != 0:
         for c_type in [CLOTH_1, CLOTH_2]:
             FindType(c_type, Backpack())
             for cloth in GetFoundList():
                 if check_abort(): return
                 world_save_guard()
-                
-                # Dye the cloth first
                 if dye_tub_serial != 0:
                     UseObject(dye_tub_serial)
                     WaitForTarget(2000)
                     TargetToObject(cloth)
                     Wait(600)
-                    
-                # Move to Resource Crate
                 MoveItem(cloth, 0, crate_serial, 0, 0, 0)
                 Wait(800)
-    else:
-        AddToSystemJournal("Material Crate not set in Config. Skipping cloth storage.")
 
 def execute_trade_loop():
     config = load_config()
-    if not config:
-        AddToSystemJournal("Error: Config not found.")
-        return
+    if not config: return
 
-    # Dynamically pull trade configurations saved by the GUI
     target_trades = config.get("trade", {}).get("target_trades", TARGET_TRADES)
     buy_cloth_amount = config.get("trade", {}).get("buy_cloth_amount", BUY_CLOTH_AMOUNT)
 
-    consegna_serial = config["books"]["Consegna"]
-    origine_serial = config["books"]["Origine"]
-    rb_serial = config["travel"]["RuneBook"]
-    travel_method = config["travel"]["Method"]
-    home_x = config["home"]["X"]
-    home_y = config["home"]["Y"]
+    consegna_serial = config.get("books", {}).get("Consegna", 0)
+    rb_serial = config.get("travel", {}).get("RuneBook", 0)
+    travel_method = config.get("travel", {}).get("Method", "Recall")
+    home_x = config.get("home", {}).get("X", 0)
+    home_y = config.get("home", {}).get("Y", 0)
     
-    trash_serial = config["containers"]["TrashBarrel"]
-    crate_serial = config["containers"]["MaterialCrate"]
-    dye_tub_serial = config["containers"]["ClothDyeTub"]
+    trash_serial = config.get("containers", {}).get("TrashBarrel", 0)
+    crate_serial = config.get("containers", {}).get("MaterialCrate", 0)
+    dye_tub_serial = config.get("containers", {}).get("ClothDyeTub", 0)
 
-    if consegna_serial == 0:
-        AddToSystemJournal("Error: Consegna Book/Bag not set in Config.")
-        return
+    if consegna_serial == 0: return
 
-    # Clean UI state before starting
     close_all_gumps()
 
-    # 1. Travel to Trade NPC
-    tailor1_idx = config["travel"]["Runes"].get("Tailor1", 3)
-    tailor2_idx = config["travel"]["Runes"].get("Tailor2", 7)
+    tailor1_idx = config.get("travel", {}).get("Runes", {}).get("Tailor1", 3)
+    tailor2_idx = config.get("travel", {}).get("Runes", {}).get("Tailor2", 7)
     
     travel_to(rb_serial, travel_method, tailor1_idx)
     target_npc = find_tailor()
     
-    # Fallback to Tailor2 if the location was blocked, we fizzled, or no NPC was found
     if target_npc == 0:
-        AddToSystemJournal("Weaver/Tailor not found at primary spot. Attempting backup spot...")
         travel_to(rb_serial, travel_method, tailor2_idx)
         target_npc = find_tailor()
         
-    if target_npc == 0:
-        AddToSystemJournal("Error: Could not find Weaver or Tailor at any spots. Aborting.")
-        return
+    if target_npc == 0: return
     
-    AddToSystemJournal(f"Found Target NPC: {hex(target_npc)}. Goal: Deliver {target_trades} BODs.")
-
-    # 2. Immediate Initial Request (Burn off the cooldown timer right away)
     request_new_bod(target_npc)
-    move_bods_to_origine(origine_serial)
+    sort_new_bods(config)
     Wait(1500)
 
     trades_completed = 0
     
-    # 3. Loop Delivery & Requests
     while trades_completed < target_trades:
-        if check_abort():
-            AddToSystemJournal("Abort detected. Halting Trade Loop.")
-            break
-            
+        if check_abort(): break
         world_save_guard()
         
-        # Check if Consegna is a Book or a Bag
         if GetType(consegna_serial) == BOOK_TYPE:
             bod_to_give = extract_bod_from_book(consegna_serial)
         else:
             FindType(BOD_TYPE, consegna_serial)
             bod_to_give = FindItem() if FindCount() > 0 else 0
             
-        if bod_to_give == 0:
-            AddToSystemJournal(f"Consegna is empty! Stopped after {trades_completed} trades.")
-            break
+        if bod_to_give == 0: break
             
-        # Give BOD -> Get Reward
         success = trade_bod(target_npc, bod_to_give)
         if success:
             trades_completed += 1
-            
-            # Request new BOD to replace the one we just gave
             request_new_bod(target_npc)
-            
-            # Move the newly acquired BOD to Origine
-            move_bods_to_origine(origine_serial)
-            
-            # Pause between BOD actions
+            sort_new_bods(config)
             Wait(1500)
         else:
-            AddToSystemJournal("Failed to trade BOD. Aborting loop.")
             break
             
-    AddToSystemJournal(f"Trade Loop Complete. {trades_completed} BODs cycled.")
-    
     if not check_abort():
-        # 4. Buy & Cut Cloth
         buy_and_cut_cloth(target_npc, buy_cloth_amount)
-        
-        # 5. Recall to WorkSpot1
-        ws1_index = config["travel"]["Runes"]["WorkSpot1"]
+        ws1_index = config.get("travel", {}).get("Runes", {}).get("WorkSpot1", 1)
         travel_to(rb_serial, travel_method, ws1_index)
         
-        # 6. Walk to exact Home Spot
         if home_x != 0 and home_y != 0:
-            AddToSystemJournal(f"Walking to Home Spot ({home_x}, {home_y})...")
             newMoveXY(home_x, home_y, True, 0, True)
             
-        # 7. Scan and Process Prizes
         process_prizes_at_home(trash_serial, crate_serial, dye_tub_serial)
         
     AddToSystemJournal("Route Complete. Cycle successful.")

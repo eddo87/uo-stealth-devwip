@@ -16,6 +16,7 @@ BOOK_GUMP_ID = 0x54F555DF
 NEXT_PAGE_BTN = 3          
 CONFIG_FILE = f"{StealthPath()}Scripts\\{CharName()}_bodcycler_config.json"
 STATS_FILE = f"{StealthPath()}Scripts\\{CharName()}_bodcycler_stats.json"
+INVENTORY_FILE = f"{StealthPath()}Scripts\\{CharName()}_bodcycler_inventory.json"
 
 def load_config():
     if os.path.exists(CONFIG_FILE):
@@ -35,35 +36,22 @@ def check_abort():
         except: pass
     return False
 
+def set_status(status_text):
+    """Updates the global stats file to reflect current state and clear stale aborts."""
+    if os.path.exists(STATS_FILE):
+        try:
+            with open(STATS_FILE, "r") as f:
+                data = json.load(f)
+            data["status"] = status_text
+            with open(STATS_FILE, "w") as f:
+                json.dump(data, f, indent=4)
+        except: pass
+
 def close_all_gumps():
-    """Closes all active gumps to start fresh."""
     count = GetGumpsCount()
     for i in range(count - 1, -1, -1):
         CloseSimpleGump(i)
         Wait(100)
-
-def find_and_open_book(target_serial):
-    """Opens the targeted book from config."""
-    if target_serial == 0:
-        AddToSystemJournal("Error: Conserva book not set in Config.")
-        return None
-        
-    UseObject(target_serial)
-    for _ in range(20): 
-        world_save_guard()
-        Wait(100)
-        for i in range(GetGumpsCount()):
-            g = GetGumpInfo(i)
-            if g and g.get("GumpID") == BOOK_GUMP_ID:
-                return i
-    return None
-
-def get_bod_book_gump():
-    for i in range(GetGumpsCount()):
-        g = GetGumpInfo(i)
-        if g and g.get("GumpID") == BOOK_GUMP_ID:
-            return i, g
-    return None, None
 
 def get_all_elements(g):
     elements = []
@@ -95,6 +83,7 @@ def infer_material(item_name, current_mat):
     return current_mat
 
 def parse_page_visually(g):
+    """Parses text from the Gump to extract accurate BOD properties."""
     elements = get_all_elements(g)
     rows = {}
     TOLERANCE_Y = 10 
@@ -171,7 +160,6 @@ def parse_page_visually(g):
     for bod in raw_bods:
         if bod['type'] == 'Large':
             cat = categorize_items(bod['item'])
-            pid = get_prize_number(cat, bod['material'], bod['amount'], bod['quality'])
             
             bod_obj = {
                 "type": "Large",
@@ -179,7 +167,6 @@ def parse_page_visually(g):
                 "quality": bod['quality'],
                 "material": bod['material'],
                 "amount": bod['amount'],
-                "prize_id": pid,
                 "category": cat
             }
             final_bods.append(bod_obj)
@@ -190,8 +177,6 @@ def parse_page_visually(g):
                 parent = final_bods[last_large_idx]
                 if parent['amount'] == 0 and bod['amount'] > 0:
                     parent['amount'] = bod['amount']
-                    pid = get_prize_number(parent['category'], parent['material'], parent['amount'], parent['quality'])
-                    parent['prize_id'] = pid
             continue
 
         elif bod['type'] == 'Small':
@@ -199,8 +184,6 @@ def parse_page_visually(g):
             cat = categorize_items(bod['item'])
             if cat in ["Male Leather Set", "Female Leather Set", "Studded Set", "Town Crier Set"]:
                 cat = "Small Bods"
-
-            pid = get_prize_number(cat, bod['material'], bod['amount'], bod['quality'])
             
             bod_obj = {
                 "type": "Small",
@@ -208,12 +191,83 @@ def parse_page_visually(g):
                 "quality": bod['quality'],
                 "material": bod['material'],
                 "amount": bod['amount'],
-                "prize_id": pid,
                 "category": cat
             }
             final_bods.append(bod_obj)
 
     return final_bods
+
+def map_and_save_book_inventory(book_serial):
+    """Fast-polls the book, assigns global positions, and saves to JSON."""
+    close_all_gumps()
+    UseObject(book_serial)
+    
+    t_start = time.time()
+    current_serial = 0
+    idx = -1
+    while time.time() - t_start < 3:
+        Wait(10)
+        for i in range(GetGumpsCount()):
+            if GetGumpID(i) == BOOK_GUMP_ID:
+                idx = i
+                current_serial = GetGumpInfo(i)['Serial']
+                break
+        if idx != -1: break
+        
+    if idx == -1: 
+        AddToSystemJournal("Scanner Error: Failed to open Conserva book.")
+        return []
+    
+    inventory = []
+    page_num = 1
+    global_pos = 0  
+    
+    while True:
+        if check_abort(): break
+        world_save_guard()
+        
+        gumps = [GetGumpInfo(i) for i in range(GetGumpsCount())]
+        g = next((x for x in gumps if x and x.get("GumpID") == BOOK_GUMP_ID), None)
+        if not g: break
+        
+        bods_on_page = parse_page_visually(g)
+        
+        for bod in bods_on_page:
+            bod['page'] = page_num
+            bod['pos'] = global_pos
+            bod['drop_btn'] = 5 + (global_pos * 2)
+            inventory.append(bod)
+            global_pos += 1
+            
+        NumGumpButton(idx, NEXT_PAGE_BTN)
+        
+        t_flip = time.time()
+        page_changed = False
+        while time.time() - t_flip < 8:
+            Wait(10)
+            for i in range(GetGumpsCount()):
+                if GetGumpID(i) == BOOK_GUMP_ID:
+                    g2 = GetGumpInfo(i)
+                    if g2['Serial'] != current_serial:
+                        current_serial = g2['Serial']
+                        idx = i
+                        page_changed = True
+                        break
+            if page_changed: break
+                
+        if not page_changed: break
+        page_num += 1
+        
+    # Write the entire freshly mapped array to JSON
+    if not check_abort():
+        try:
+            with open(INVENTORY_FILE, "w") as f:
+                json.dump(inventory, f, indent=4)
+            AddToSystemJournal(f"State Management: Successfully saved {len(inventory)} BODs to JSON.")
+        except Exception as e:
+            AddToSystemJournal(f"State Management Error: Could not save JSON. {e}")
+        
+    return inventory
 
 def generate_progress_report(all_bods):
     small_inv = {} 
@@ -254,8 +308,16 @@ def generate_progress_report(all_bods):
         min_comp = 999999
         
         for c in components:
-            s_key = (c.lower(), mat, qual, amt)
-            count = small_inv.get(s_key, 0)
+            count = 0
+            
+            # Bulletproof check: accept BOTH Cloth and Leather for Town Crier parts
+            if set_name == "Town Crier Set":
+                count = small_inv.get((c.lower(), "Cloth", qual, amt), 0) + \
+                        small_inv.get((c.lower(), "Leather", qual, amt), 0)
+            else:
+                s_key = (c.lower(), mat, qual, amt)
+                count = small_inv.get(s_key, 0)
+
             comp_counts[c] = count
             if count > 0: has_any_small = True
             if count < min_comp: min_comp = count
@@ -291,48 +353,29 @@ def generate_progress_report(all_bods):
 
 def run_scanner():
     """Main entry point, triggered by GUI."""
+    # Set status to Scanning to clear any stale "Stopped" states and update the GUI
+    set_status("Scanning")
+    
     config = load_config()
     if not config:
         AddToSystemJournal("Scanner Error: Config not found. Please save first.")
+        set_status("Idle")
         return
 
     conserva_serial = config.get("books", {}).get("Conserva", 0)
+    if conserva_serial == 0:
+        AddToSystemJournal("Scanner Error: Conserva book not configured.")
+        set_status("Idle")
+        return
 
-    close_all_gumps()
-    idx = find_and_open_book(conserva_serial)
-    if idx is None: return
-
-    _, g = get_bod_book_gump()
-    prev_serial = 0
-    all_bods = []
+    AddToSystemJournal("Scanning Conserva Book & Rebuilding JSON Database... Please Wait.")
     
-    AddToSystemJournal("Scanning Conserva Book... Please Wait.")
+    all_bods = map_and_save_book_inventory(conserva_serial)
     
-    while True:
-        if check_abort():
-            AddToSystemJournal("Scanner aborted by user.")
-            break
-            
-        world_save_guard()
-        results = parse_page_visually(g)
-        all_bods.extend(results)
+    if check_abort():
+        AddToSystemJournal("Scanner aborted by user.")
+        return
         
-        prev_serial = g['Serial']
-        NumGumpButton(idx, NEXT_PAGE_BTN)
-        
-        # Dynamic wait for next page
-        t = time.time()
-        while time.time() - t < 3:
-            world_save_guard()
-            Wait(100)
-            idx2, g2 = get_bod_book_gump()
-            if idx2 is not None and g2['Serial'] != prev_serial:
-                break
-        
-        if idx2 is None or g2['Serial'] == prev_serial:
-            break
-        idx, g = idx2, g2
-
     total_smalls = sum(1 for b in all_bods if b['type'] == 'Small')
     total_larges = sum(1 for b in all_bods if b['type'] == 'Large')
 
@@ -341,6 +384,10 @@ def run_scanner():
     AddToSystemJournal(f"Inventory: {total_smalls} Smalls | {total_larges} Larges")
     
     generate_progress_report(all_bods)
+    
+    # Reset status back to Idle after a successful manual scan
+    if not check_abort():
+        set_status("Idle")
 
 if __name__ == '__main__':
     run_scanner()

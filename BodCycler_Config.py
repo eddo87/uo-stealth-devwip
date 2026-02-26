@@ -4,6 +4,7 @@ import json
 import threading
 import time
 import importlib
+import BodCycler_AI_Debugger
 from tkinter import *
 from datetime import datetime
 
@@ -320,22 +321,15 @@ class BodCyclerGUI(threading.Thread):
                 import BodCycler_NPC_Trade
                 importlib.reload(BodCycler_NPC_Trade)
                 BodCycler_NPC_Trade.execute_trade_loop()
-                
-                # STEP 4: Assemble Large BODs from Conserva
-                if STATS["status"] == "Stopped": break
-                self.set_global_status("Running (Assembling)")
-                ClientPrintEx(Self(), 1, 1, "Master: Assembling Sets...")
-                import BodCycler_Assembler
-                importlib.reload(BodCycler_Assembler)
-                BodCycler_Assembler.run_assembler()
+            
                 
                 # LOOP PAUSE
                 if STATS["status"] == "Stopped": break
                 self.set_global_status("Running (Cooldown)")
-                AddToSystemJournal("Cycle complete. Resting for 5 seconds before repeating...")
+                AddToSystemJournal("Cycle complete. Fumando una sigaretta...")
                 
                 # Sleep in increments so we can interrupt it instantly if Stop is pressed
-                for _ in range(5):
+                for _ in range(3):
                     if STATS["status"] == "Stopped": break
                     time.sleep(1)
                 
@@ -345,6 +339,7 @@ class BodCyclerGUI(threading.Thread):
                 break
                 
         AddToSystemJournal("=== MASTER CYCLE STOPPED ===")
+        BodCycler_AI_Debugger.send_discord_session_report()
 
     def start_cycling(self):
         if STATS["status"] != "Idle" and STATS["status"] != "Stopped" and "Running" in STATS["status"]:
