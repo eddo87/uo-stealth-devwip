@@ -514,10 +514,10 @@ class BodCyclerGUI(threading.Thread):
     def check_assembly_readiness(self):
         """
         Reads inventory.json and reports completable sets WITHOUT touching the game client.
-        Safe to call at any time — purely a file I/O + logic operation.
+        Sets and their components are reported in reverse-position order (mirrors Assembler sweep).
         """
         import json, os
-        from bod_data import LARGE_COMPONENTS, prize_names
+        from bod_data import LARGE_COMPONENTS, prize_names, get_prize_number
 
         if not os.path.exists(INVENTORY_FILE):
             AddToSystemJournal("Assembly Check: inventory.json not found. Run a Scan first.")
@@ -545,23 +545,42 @@ class BodCyclerGUI(threading.Thread):
         if not sets:
             AddToSystemJournal("No complete sets ready. Keep collecting small BODs.")
         else:
+            # --- FIX 2: sort sets by large pos descending (mirrors Reverse Sweep order) ---
+            sets.sort(key=lambda s: s['large'].get('pos', 0), reverse=True)
+
             for i, s in enumerate(sets, 1):
                 large = s['large']
                 smalls = s['smalls']
+
+                # --- FIX 1: compute prize_id live from bod_data if not stored ---
                 prize_id = large.get('prize_id')
-                reward_label = prize_names.get(prize_id, f"Prize #{prize_id}") if prize_id else "Unknown Reward"
-                cat = large.get('category', large.get('item', '?'))
-                mat = large.get('material', '?')
+                if not prize_id:
+                    cat      = large.get('category', '')
+                    mat      = large.get('material', '')
+                    amt      = large.get('amount', 0)
+                    qual     = large.get('quality', 'Normal')
+                    prize_id = get_prize_number(cat, mat, amt, qual)
+                    
+
+                reward_label = prize_names.get(prize_id, f"Prize #{prize_id}") if prize_id else "No Prize"
+                cat  = large.get('category', large.get('item', '?'))
+                mat  = large.get('material', '?')
                 qual = large.get('quality', '?')
-                amt = large.get('amount', '?')
+                amt  = large.get('amount', '?')
+
+                # --- FIX 2: sort smalls descending by pos (mirrors Reverse Sweep order) ---
+                smalls_sorted = sorted(smalls, key=lambda x: x.get('pos', 0), reverse=True)
+                small_positions = ', '.join(str(x.get('pos', '?')) for x in smalls_sorted)
+
                 AddToSystemJournal(
                     f"  Set #{i}: {cat} | {mat} {qual} x{amt} "
                     f"-> {reward_label} "
-                    f"[Large @ pos {large.get('pos','?')} | "
-                    f"{len(smalls)} smalls: {', '.join(str(s.get('pos','?')) for s in smalls)}]"
+                    f"[Large @ pos {large.get('pos', '?')} | "
+                    f"Smalls (high->low): {small_positions}]"
                 )
 
         AddToSystemJournal("========================================")
+
 
 if __name__ == '__main__':
     app = BodCyclerGUI()
