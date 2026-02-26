@@ -41,7 +41,7 @@ except ImportError:
 CONFIG_FILE = f"{StealthPath()}Scripts\\{CharName()}_bodcycler_config.json"
 SUPPLY_FILE = f"{StealthPath()}Scripts\\{CharName()}_bodcycler_supplies.json"
 STATS_FILE = f"{StealthPath()}Scripts\\{CharName()}_bodcycler_stats.json"
-ICON_FILE = f"{StealthPath()}Scripts\\icon.ico" 
+INVENTORY_FILE = f"{StealthPath()}Scripts\\{CharName()}_bodcycler_inventory.json"
 
 STATS = {
     "start_time": None,
@@ -371,6 +371,7 @@ class BodCyclerGUI(threading.Thread):
 
         f_type = Frame(lf_log)
         f_type.pack(fill="x", pady=5)
+        Button(lf_log, text="Check Assembly (JSON only)", command=self.check_assembly_readiness, bg="#B0E0E6", font=("Arial", 8)).pack(fill="x", padx=5, pady=(0, 4))
         self.vars["cycle_type"] = StringVar(value=self.config.get("cycle_type", "Tailor"))
         Label(f_type, text="Mode:").pack(side=LEFT, padx=2)
         Radiobutton(f_type, text="Tailor", variable=self.vars["cycle_type"], value="Tailor").pack(side=LEFT)
@@ -381,6 +382,7 @@ class BodCyclerGUI(threading.Thread):
         Button(f_type, text="Craft", command=self.trigger_crafting, bg="#FFD700").pack(side=RIGHT, padx=1)
         Button(f_type, text="Assemble", command=self.trigger_assemble, bg="#DDA0DD").pack(side=RIGHT, padx=1)
         Button(f_type, text="Scan", command=self.trigger_scan, bg="#FFB6C1").pack(side=RIGHT, padx=1)
+        
 
         # Configurable Variables for Trading
         f_trade_vars = Frame(lf_log)
@@ -508,6 +510,58 @@ class BodCyclerGUI(threading.Thread):
         self.read_stats_file()
         self.update_timer()
         self.root.mainloop()
+
+    def check_assembly_readiness(self):
+        """
+        Reads inventory.json and reports completable sets WITHOUT touching the game client.
+        Safe to call at any time — purely a file I/O + logic operation.
+        """
+        import json, os
+        from bod_data import LARGE_COMPONENTS, prize_names
+
+        if not os.path.exists(INVENTORY_FILE):
+            AddToSystemJournal("Assembly Check: inventory.json not found. Run a Scan first.")
+            return
+
+        try:
+            with open(INVENTORY_FILE, "r") as f:
+                inventory = json.load(f)
+        except Exception as e:
+            AddToSystemJournal(f"Assembly Check: Failed to read inventory.json — {e}")
+            return
+
+        try:
+            import BodCycler_Assembler
+            importlib.reload(BodCycler_Assembler)
+            sets = BodCycler_Assembler.find_completable_sets(inventory)
+        except Exception as e:
+            AddToSystemJournal(f"Assembly Check: Error running find_completable_sets — {e}")
+            return
+
+        AddToSystemJournal("========================================")
+        AddToSystemJournal(f"ASSEMBLY CHECK: {len(sets)} completable set(s) found in JSON")
+        AddToSystemJournal("========================================")
+
+        if not sets:
+            AddToSystemJournal("No complete sets ready. Keep collecting small BODs.")
+        else:
+            for i, s in enumerate(sets, 1):
+                large = s['large']
+                smalls = s['smalls']
+                prize_id = large.get('prize_id')
+                reward_label = prize_names.get(prize_id, f"Prize #{prize_id}") if prize_id else "Unknown Reward"
+                cat = large.get('category', large.get('item', '?'))
+                mat = large.get('material', '?')
+                qual = large.get('quality', '?')
+                amt = large.get('amount', '?')
+                AddToSystemJournal(
+                    f"  Set #{i}: {cat} | {mat} {qual} x{amt} "
+                    f"-> {reward_label} "
+                    f"[Large @ pos {large.get('pos','?')} | "
+                    f"{len(smalls)} smalls: {', '.join(str(s.get('pos','?')) for s in smalls)}]"
+                )
+
+        AddToSystemJournal("========================================")
 
 if __name__ == '__main__':
     app = BodCyclerGUI()

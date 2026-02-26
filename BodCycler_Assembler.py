@@ -136,10 +136,10 @@ def extract_bods(book_serial, target_bods):
             # Flip to the correct page
             while current_page < target_page:
                 if check_abort(): return extracted_map
-                    NumGumpButton(idx, NEXT_PAGE_BTN)
-                    idx, current_serial, page_changed = wait_for_gump_serial_change(current_serial, BOOK_GUMP_ID, 8000)
-                    if not page_changed:
-                        break
+                NumGumpButton(idx, NEXT_PAGE_BTN)
+                idx, current_serial, page_changed = wait_for_gump_serial_change(current_serial, BOOK_GUMP_ID, 8000)
+                if not page_changed:
+                    break
                     
                 current_page += 1
                 
@@ -313,6 +313,75 @@ def run_assembler():
             AddToSystemJournal(f"State Management Error: Could not update JSON. {e}")
 
     return sets_completed
+
+    def check_assembly_readiness(self):
+        """
+        Reads inventory.json and reports completable sets WITHOUT touching the game client.
+        Sets and their components are reported in reverse-position order (mirrors Assembler sweep).
+        """
+        import json, os
+        from bod_data import LARGE_COMPONENTS, prize_names, get_prize_number
+
+        if not os.path.exists(INVENTORY_FILE):
+            AddToSystemJournal("Assembly Check: inventory.json not found. Run a Scan first.")
+            return
+
+        try:
+            with open(INVENTORY_FILE, "r") as f:
+                inventory = json.load(f)
+        except Exception as e:
+            AddToSystemJournal(f"Assembly Check: Failed to read inventory.json — {e}")
+            return
+
+        try:
+            import BodCycler_Assembler
+            importlib.reload(BodCycler_Assembler)
+            sets = BodCycler_Assembler.find_completable_sets(inventory)
+        except Exception as e:
+            AddToSystemJournal(f"Assembly Check: Error running find_completable_sets — {e}")
+            return
+
+        AddToSystemJournal("========================================")
+        AddToSystemJournal(f"ASSEMBLY CHECK: {len(sets)} completable set(s) found in JSON")
+        AddToSystemJournal("========================================")
+
+        if not sets:
+            AddToSystemJournal("No complete sets ready. Keep collecting small BODs.")
+        else:
+            # --- FIX 2: sort sets by large pos descending (mirrors Reverse Sweep order) ---
+            sets.sort(key=lambda s: s['large'].get('pos', 0), reverse=True)
+
+            for i, s in enumerate(sets, 1):
+                large = s['large']
+                smalls = s['smalls']
+
+                # --- FIX 1: compute prize_id live from bod_data if not stored ---
+                prize_id = large.get('prize_id')
+                if not prize_id:
+                    cat      = large.get('category', '')
+                    mat      = large.get('material', '')
+                    amt      = large.get('amount', 0)
+                    qual     = large.get('quality', 'Normal')
+                    prize_id = get_prize_number(cat, mat, amt, qual)
+
+                reward_label = prize_names.get(prize_id, f"Prize #{prize_id}") if prize_id else "No Prize"
+                cat  = large.get('category', large.get('item', '?'))
+                mat  = large.get('material', '?')
+                qual = large.get('quality', '?')
+                amt  = large.get('amount', '?')
+
+                # --- FIX 2: sort smalls descending by pos (mirrors Reverse Sweep order) ---
+                smalls_sorted = sorted(smalls, key=lambda x: x.get('pos', 0), reverse=True)
+                small_positions = ', '.join(str(x.get('pos', '?')) for x in smalls_sorted)
+
+                AddToSystemJournal(
+                    f"  Set #{i}: {cat} | {mat} {qual} x{amt} "
+                    f"-> {reward_label} "
+                    f"[Large @ pos {large.get('pos', '?')} | "
+                    f"Smalls (high->low): {small_positions}]"
+                )
+
+        AddToSystemJournal("========================================")
 
 if __name__ == '__main__':
     run_assembler()

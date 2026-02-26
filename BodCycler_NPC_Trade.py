@@ -91,7 +91,8 @@ def sort_new_bods(config):
                     "quality": "Exceptional" if info.get('is_except') else "Normal",
                     "material": info.get('material', 'Iron'),
                     "amount": info.get('qty_needed', 20),
-                    "category": info['item_name'] # For Large BODs, item_name equates to the Category Set
+                    "category": info['item_name'], # For Large BODs, item_name equates to the Category Set
+                    "prize_id": info.get('prize_id')
                 }
             elif scartare_serial != 0:
                 dest_book = scartare_serial
