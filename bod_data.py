@@ -64,7 +64,8 @@ prize_pattern = {
     },
     "Town Crier Set": {
         "Exceptional": {
-            "Cloth": {20: 23}    # CBD
+            "Cloth": {20: 23},    # CBD
+            "Leather": {20: 23}
         }
     },
     

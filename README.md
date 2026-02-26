@@ -1,119 +1,71 @@
-BOD Cycling Automation Project Plan
+BOD Cycler Orchestration Architecture
 
-1. Project Architecture & Assets
+Overview
 
-We have successfully built a Controller Script (BodCycler_Config.py) that orchestrates your modules using multi-threading, live hot-reloading, and JSON inter-script communication.
+The BOD Cycler is a modular automation suite for Ultima Online (Stealth Client) designed to automate the acquisition, crafting, and delivery of Bulk Order Deeds (BODs). Unlike traditional monolithic macros, this system uses a Central Orchestrator pattern with a Tkinter GUI to manage state, configuration, and execution.
 
-Core System Assets
+Core Components
 
-BodCycler_Config.py: The GUI Command Center. Manages the master thread, dashboard, and global abort states.
+1. The Orchestrator (BodCycler_Config.py)
 
-BodCycler_CheckSupplies.py: Restocks ingots and manages tool thresholds for both Smithing and Tailoring.
+This is the "Brain" of the operation. It handles three critical roles:
 
-BodCycler_Crafting.py: Smartly extracts BODs, assesses current fill levels, crafts missing quantities with dynamic pacing, and fills the BODs using intelligent cursors.
+Configuration Management: Stores serial IDs for containers, books, and runebooks in a local JSON.
 
-BodCycler_NPC_Trade.py: Handles NPC interaction (Weaver/Tailor prioritization), trading, requesting new BODs, filing to books, buying cloth via AutoBuy fallbacks, and runebook travel.
+State Tracking: Monitors a stats.json file to update a live dashboard (Timer, Status, Rewards).
 
-bod_crafting_data.py: Dictionary matching string names to category menus and specific shard hex IDs.
+Master Threading: Launches worker macros in a background Daemon Thread, allowing the GUI to remain responsive.
 
-The 5-Book System
+2. The Multi-Book System
 
-All books are fully implemented and utilized by the scripts:
+The logic relies on a 5-book pipeline to organize data without complex internal lists:
 
-0. Source (Backpack/Incoming): New BODs received from NPC.
+Origine: The input source containing un-filled, low-tier BODs.
 
-1. Origine (The Fuel): Small, easy BODs (Iron/Cloth). 10/15/20 count.
+Conserva: High-value BODs (Large or Rare Materials) kept for assembly or rewards.
 
-2. Conserva (The Goal): High-tier BODs stored for rewards.
+Consegna: The "Delivery Bag." Filled BODs ready to be handed to an NPC.
 
-3. Riprova (The Buffer): BODs failing due to lacking materials or interruptions.
+Riprova: A retry buffer for BODs that failed due to lack of materials.
 
-4. Consegna (The Ammo): Origine BODs that are filled and ready to trade.
+Scartare: Automated trash for unwanted BOD types (e.g., Bone armor).
 
-5. Scartare (The Trash): BODs that are neither easy to fill nor valuable (e.g., Bone armor).
+3. Logic Modules (The Workers)
 
-2. The Workflow (State Machine)
+Each phase of the cycle is a separate, hot-reloadable module:
 
-The BodCycler_Config.py script runs this Master Loop in a Daemon Thread:
+CheckSupplies: Audits tool durability and material counts. Crafts tools (Tongs, Kits) on-demand.
 
-Init (BodCycler_CheckSupplies.py):
+Crafting: Extracts BODs, parses requirements, pulls resources from a crate, and fills the deed.
 
-Load Configs.
+NPC_Trade: Handles travel, context-menu interaction with NPCs, and AutoBuy logic for cloth.
 
-Check container caches.
+Assembler: Scans the 'Conserva' book to identify and build complete Large BOD sets.
 
-Craft necessary Tinker Tools, Sewing Kits, or Tongs.
+Critical Mechanisms
 
-Update Live Dashboard JSON.
+Global Abort (The Circuit Breaker)
 
-Restock & Prep (BodCycler_Crafting.py):
+Since Stealth scripts run synchronously, stopping a macro usually requires a hard script-stop. This system implements a Soft Abort:
 
-Recover from crashes (check backpack for lingering BOD).
+The GUI writes "status": "Stopped" to the stats JSON.
 
-Extract BOD from Origine.
+All worker modules call check_abort() at the start of every internal loop (e.g., every item crafted, every step moved).
 
-Parse requested amounts.
+If "Stopped" is detected, the worker cleans up UI (closes gumps) and exits the thread gracefully.
 
-Pull exact materials from Crate.
+Hot-Reloading
 
-Dynamically craft items.
+By using importlib.reload() within the Master Cycle, the orchestrator can update its logic without the user having to restart the GUI. This allows for "Live Debugging" where a developer can tweak a material ID or a delay and see the change reflected in the very next cycle.
 
-Route full BODs to Consegna or Conserva.
+World Save Guard
 
-Transit & Trade (BodCycler_NPC_Trade.py):
+Every module integrates with checkWorldSave.py. This prevents the "Gump Freeze" common on ServUO/RunUO shards where an action performed during a world save is lost, but the script continues as if it succeeded.
 
-Travel to WorkSpot -> NPC.
+Data Flow Diagram
 
-Prioritize Weavers. Fallback to backup locations if blocked/fizzled.
-
-Execute loop: Hand in BOD -> Get New BOD -> Move New BOD to Origine.
-
-Execute AutoBuy for Cloth Bolts (using fallback IDs).
-
-Cut cloth.
-
-Travel Home.
-
-Process prizes (Trash garbage, store/dye cloth).
-
-Repeat & Listen:
-
-Loop restarts unless the global check_abort() flag catches a Stop command from the GUI.
-
-3. Development Checklist
-
-Phase 1: Setup (The Foundation)
-
-[x] Config Tool: Create BodCycler_Config.py (GUI to set Serial IDs).
-
-[x] Category Logic: Logic implemented to sort "Keep", "Fuel", or "Trash" BODs.
-
-Phase 2: Production (The Filling)
-
-[x] Batch Filler: Script that pulls from Book A, Crafts, Puts in Book B.
-
-[x] Test: Verify crafting logic reliably fills Small Iron/Cloth BODs with dynamic pacing and crash recovery.
-
-Phase 3: Interaction (The Cycling)
-
-[x] NPC Interaction: Handle the timer, BOD hand-ins, and automated purchasing.
-
-[x] Sorting: Ensure the script can distinguish New BODs, automatically filing them back into the Origine book.
-
-Phase 4: Integration (Command Center & Master Loop)
-
-[x] Master Script: Combine Home -> Fill -> Travel -> Trade -> Sort -> Return loop.
-
-[x] Live Dashboard: GUI updates in real-time reading from JSON files.
-
-[x] Hot-Reloading: Dynamic module imports so code can be tweaked without restarting the GUI.
-
-[x] Safe Threading & Aborts: Non-blocking GUI thread with instant JSON-based check_abort() hooks in all worker scripts.
-
-Phase 5: Beta Polish
-
-[ ] Edge Case Handling (Server saves, tool breaks mid-craft, random disconnects).
-
-[ ] Expand to Smithing BOD logic thoroughly (Verify tongs, ingots, and anvil proximity).
-
-[ ] Long-term stability testing (Unattended overnight runs).
+[ GUI ] <--> [ config.json ]
+  |             ^
+  | (Spawns)    | (Reads/Writes)
+  v             v
+[ Master Thread ] --> [ CheckSupplies ] --> [ Crafting ] --> [ NPC Trade ]
