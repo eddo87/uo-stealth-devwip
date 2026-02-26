@@ -7,6 +7,7 @@ import importlib
 import BodCycler_AI_Debugger
 from tkinter import *
 from datetime import datetime
+from BodCycler_Utils import set_status as _write_status_to_file
 
 # Import the logic modules
 try:
@@ -33,6 +34,8 @@ try:
     import BodCycler_Assembler
 except ImportError:
     pass
+
+
 
 # --- Configuration & Globals ---
 CONFIG_FILE = f"{StealthPath()}Scripts\\{CharName()}_bodcycler_config.json"
@@ -255,13 +258,14 @@ class BodCyclerGUI(threading.Thread):
             pass
 
     def reset_stats(self):
-        empty_stats = {"crafted": 0, "prized_small": 0, "prized_large": 0, "status": STATS["status"]}
-        try:
-            with open(STATS_FILE, "w") as f:
-                json.dump(empty_stats, f)
-            self.read_stats_file()
-        except Exception:
-            pass
+        data = read_stats()
+        data["crafted"] = 0
+        data["prized_small"] = 0
+        data["prized_large"] = 0
+        data["mats_used"] = {}
+        data["recovery_success"] = 0
+        write_stats(data)
+        self.read_stats_file()
 
     def update_timer(self):
         if not self.root: return
@@ -277,22 +281,12 @@ class BodCyclerGUI(threading.Thread):
         if self.running: self.root.after(1000, self.update_timer)
 
     # --- ORCHESTRATION: The Master Loop ---
+
     def set_global_status(self, status_text):
-        """Updates internal memory and physically writes status to file for worker scripts to read."""
+        """Updates the GUI and writes status to the stats file for worker scripts to read."""
         STATS["status"] = status_text
         self.vars["status"].set(f"Status: {status_text}")
-        try:
-            stats_data = {"crafted": 0, "prized_small": 0, "prized_large": 0}
-            if os.path.exists(STATS_FILE):
-                with open(STATS_FILE, "r") as f:
-                    stats_data.update(json.load(f))
-            
-            stats_data["status"] = status_text
-            
-            with open(STATS_FILE, "w") as f:
-                json.dump(stats_data, f, indent=4)
-        except Exception as e:
-            pass
+        set_status(status_text)
 
     def master_cycle_thread(self):
         AddToSystemJournal("=== MASTER CYCLE INITIATED ===")

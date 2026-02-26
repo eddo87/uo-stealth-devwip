@@ -65,28 +65,14 @@ BTN_MAKE_TINKER_TOOL = 23
 BTN_MAKE_SEWING_KIT = 44  
 BTN_MAKE_TONGS = 16       
 
-# Config Paths
-CONFIG_FILE = f"{StealthPath()}Scripts\\{CharName()}_bodcycler_config.json"
-SUPPLY_FILE = f"{StealthPath()}Scripts\\{CharName()}_bodcycler_supplies.json"
-STATS_FILE = f"{StealthPath()}Scripts\\{CharName()}_bodcycler_stats.json"
-
-def load_config():
-    if os.path.exists(CONFIG_FILE):
-        with open(CONFIG_FILE, "r") as f:
-            return json.load(f)
-    return None
-
-def check_abort():
-    """Checks the stats file to see if the GUI requested a hard stop."""
-    if os.path.exists(STATS_FILE):
-        try:
-            with open(STATS_FILE, "r") as f:
-                data = json.load(f)
-                if data.get("status") == "Stopped":
-                    return True
-        except:
-            pass
-    return False
+# ✅ AFTER — one import covers everything
+from BodCycler_Utils import (
+    CONFIG_FILE, STATS_FILE, INVENTORY_FILE, SUPPLY_FILE,
+    BOD_TYPE, BOD_BOOK_TYPE, BOOK_GUMP_ID, NEXT_PAGE_BTN,
+    load_config, check_abort, close_all_gumps,
+    wait_for_gump, wait_for_gump_serial_change,
+    read_stats, write_stats, set_status
+)
 
 def save_supplies_to_json(data):
     """Saves supply data to a separate JSON for the GUI to read."""
@@ -126,16 +112,6 @@ def move_items(type_id, source_id, dest_id, amount):
         Wait(600)
         count += 1
 
-def wait_for_gump(gump_id, timeout_ms=3000):
-    """Dynamically waits for a specific gump to appear."""
-    t = time.time()
-    while (time.time() - t) * 1000 < timeout_ms:
-        world_save_guard()
-        for i in range(GetGumpsCount()):
-            if GetGumpID(i) == gump_id:
-                return i
-        Wait(50)
-    return -1
 
 def text_in_gump(text: str, button_id: int = None, timeout: int = 10, gump_id: int = None) -> bool:
     end_time = time.time() + timeout

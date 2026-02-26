@@ -10,48 +10,14 @@ try:
 except ImportError:
     def world_save_guard(): return False
 
-# --- Configuration ---
-BOD_BOOK_TYPE = 0x2259     
-BOOK_GUMP_ID = 0x54F555DF  
-NEXT_PAGE_BTN = 3          
-CONFIG_FILE = f"{StealthPath()}Scripts\\{CharName()}_bodcycler_config.json"
-STATS_FILE = f"{StealthPath()}Scripts\\{CharName()}_bodcycler_stats.json"
-INVENTORY_FILE = f"{StealthPath()}Scripts\\{CharName()}_bodcycler_inventory.json"
 
-def load_config():
-    if os.path.exists(CONFIG_FILE):
-        try:
-            with open(CONFIG_FILE, "r") as f:
-                return json.load(f)
-        except: pass
-    return None
-
-def check_abort():
-    if os.path.exists(STATS_FILE):
-        try:
-            with open(STATS_FILE, "r") as f:
-                data = json.load(f)
-                if data.get("status") == "Stopped":
-                    return True
-        except: pass
-    return False
-
-def set_status(status_text):
-    """Updates the global stats file to reflect current state and clear stale aborts."""
-    if os.path.exists(STATS_FILE):
-        try:
-            with open(STATS_FILE, "r") as f:
-                data = json.load(f)
-            data["status"] = status_text
-            with open(STATS_FILE, "w") as f:
-                json.dump(data, f, indent=4)
-        except: pass
-
-def close_all_gumps():
-    count = GetGumpsCount()
-    for i in range(count - 1, -1, -1):
-        CloseSimpleGump(i)
-        Wait(100)
+from BodCycler_Utils import (
+    CONFIG_FILE, STATS_FILE, INVENTORY_FILE, SUPPLY_FILE,
+    BOD_TYPE, BOD_BOOK_TYPE, BOOK_GUMP_ID, NEXT_PAGE_BTN,
+    load_config, check_abort, close_all_gumps,
+    wait_for_gump, wait_for_gump_serial_change,
+    read_stats, write_stats, set_status
+)
 
 def get_all_elements(g):
     elements = []
@@ -239,23 +205,12 @@ def map_and_save_book_inventory(book_serial):
             inventory.append(bod)
             global_pos += 1
             
-        NumGumpButton(idx, NEXT_PAGE_BTN)
         
-        t_flip = time.time()
-        page_changed = False
-        while time.time() - t_flip < 8:
-            Wait(10)
-            for i in range(GetGumpsCount()):
-                if GetGumpID(i) == BOOK_GUMP_ID:
-                    g2 = GetGumpInfo(i)
-                    if g2['Serial'] != current_serial:
-                        current_serial = g2['Serial']
-                        idx = i
-                        page_changed = True
-                        break
-            if page_changed: break
-                
-        if not page_changed: break
+        NumGumpButton(idx, NEXT_PAGE_BTN)
+        idx, current_serial, page_changed = wait_for_gump_serial_change(current_serial, BOOK_GUMP_ID, 8000)
+        if not page_changed:
+            break
+
         page_num += 1
         
     # Write the entire freshly mapped array to JSON
