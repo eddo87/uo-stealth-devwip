@@ -7,7 +7,7 @@ import importlib
 import BodCycler_AI_Debugger
 from tkinter import *
 from datetime import datetime
-from BodCycler_Utils import set_status as _write_status_to_file
+from BodCycler_Utils import set_status
 
 # Import the logic modules
 try:
