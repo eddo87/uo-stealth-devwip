@@ -11,60 +11,14 @@ try:
 except ImportError:
     def world_save_guard(): return False
 
-# --- Quick Configuration Variables (Fallbacks) ---
-TARGET_TRADES = 2         
-BUY_CLOTH_AMOUNT = 80     
 
-# --- Constants ---
-NPC_TYPES = [0x0190, 0x0191] # Male/Female human
-BOD_TYPE = 0x2258
-BOOK_TYPE = 0x2259
-
-# Items
-BOLT_OF_CLOTH_IDS = [0x0F95, 0x0F97, 0x0F9B, 0x0F9C] # Fallback IDs for cloth bolts
-SCISSORS = 0x0F9E
-OIL_CLOTH = 0x175D
-SANDALS = 0x170D
-CLOTH_1 = 0x1766
-CLOTH_2 = 0x1767
-
-# Gumps
-BOD_GUMP_ID_SMALL = 0x9bade6ea
-BOD_GUMP_ID_LARGE = 0xbe0dad1e
-BOOK_GUMP_ID = 0x54F555DF
-
-# UI Buttons 
-CTX_BUY = 1           # Context Menu entry for 'Buy'
-CTX_BOD = 3           # Context Menu entry for 'Bulk Order Info'
-BTN_ACCEPT_BOD = 1    # 'Accept' button on BOD offer gump (Return Value 1)
-BTN_DROP_BOD_1 = 5    # The first 'Drop' button inside a BOD book
-
-CONFIG_FILE = f"{StealthPath()}Scripts\\{CharName()}_bodcycler_config.json"
-STATS_FILE = f"{StealthPath()}Scripts\\{CharName()}_bodcycler_stats.json"
-
-def load_config():
-    if os.path.exists(CONFIG_FILE):
-        with open(CONFIG_FILE, "r") as f:
-            return json.load(f)
-    return None
-
-def check_abort():
-    if os.path.exists(STATS_FILE):
-        try:
-            with open(STATS_FILE, "r") as f:
-                data = json.load(f)
-                if data.get("status") == "Stopped":
-                    return True
-        except:
-            pass
-    return False
-
-def close_all_gumps():
-    count = GetGumpsCount()
-    if count > 0:
-        for i in reversed(range(count)):
-            CloseSimpleGump(i)
-        Wait(500)
+from BodCycler_Utils import (
+    CONFIG_FILE, STATS_FILE, INVENTORY_FILE, SUPPLY_FILE,
+    BOD_TYPE, BOD_BOOK_TYPE, BOOK_GUMP_ID, NEXT_PAGE_BTN,
+    load_config, check_abort, close_all_gumps,
+    wait_for_gump, wait_for_gump_serial_change,
+    read_stats, write_stats, set_status
+)
 
 def find_tailor():
     SetFindDistance(10) 

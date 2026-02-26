@@ -9,35 +9,13 @@ try:
 except ImportError:
     def world_save_guard(): pass
 
-CONFIG_FILE = f"{StealthPath()}Scripts\\{CharName()}_bodcycler_config.json"
-STATS_FILE = f"{StealthPath()}Scripts\\{CharName()}_bodcycler_stats.json"
-INVENTORY_FILE = f"{StealthPath()}Scripts\\{CharName()}_bodcycler_inventory.json"
-BOOK_GUMP_ID = 0x54F555DF
-NEXT_PAGE_BTN = 3
-COMBINE_BTN = 2  
-BOD_TYPE = 0x2258 
-
-def load_config():
-    if os.path.exists(CONFIG_FILE):
-        try:
-            with open(CONFIG_FILE, "r") as f:
-                return json.load(f)
-        except: pass
-    return {}
-
-def check_abort():
-    if os.path.exists(STATS_FILE):
-        try:
-            with open(STATS_FILE, "r") as f:
-                data = json.load(f)
-                return data.get("status") == "Stopped"
-        except: pass
-    return False
-
-def close_all_gumps():
-    for i in range(GetGumpsCount() - 1, -1, -1):
-        CloseSimpleGump(i)
-        Wait(100)
+from BodCycler_Utils import (
+    CONFIG_FILE, STATS_FILE, INVENTORY_FILE, SUPPLY_FILE,
+    BOD_TYPE, BOD_BOOK_TYPE, BOOK_GUMP_ID, NEXT_PAGE_BTN,
+    load_config, check_abort, close_all_gumps,
+    wait_for_gump, wait_for_gump_serial_change,
+    read_stats, write_stats, set_status
+)
 
 def append_to_inventory(bod_obj):
     """
@@ -158,26 +136,10 @@ def extract_bods(book_serial, target_bods):
             # Flip to the correct page
             while current_page < target_page:
                 if check_abort(): return extracted_map
-                NumGumpButton(idx, NEXT_PAGE_BTN)
-                
-                # Fast polling to detect when the next page has actually loaded
-                t_flip = time.time()
-                page_changed = False
-                while time.time() - t_flip < 3: 
-                    Wait(10)
-                    for i in range(GetGumpsCount()):
-                        if GetGumpID(i) == BOOK_GUMP_ID:
-                            g_info = GetGumpInfo(i)
-                            if g_info['Serial'] != current_serial:
-                                current_serial = g_info['Serial']
-                                idx = i
-                                page_changed = True
-                                break
-                    if page_changed: break
-                
-                if not page_changed:
-                    lost_gump = True
-                    break 
+                    NumGumpButton(idx, NEXT_PAGE_BTN)
+                    idx, current_serial, page_changed = wait_for_gump_serial_change(current_serial, BOOK_GUMP_ID, 8000)
+                    if not page_changed:
+                        break
                     
                 current_page += 1
                 
