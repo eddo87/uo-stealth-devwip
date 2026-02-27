@@ -299,8 +299,14 @@ def execute_trade_loop():
     config = load_config()
     if not config: return
 
-    target_trades = config.get("trade", {}).get("target_trades", TARGET_TRADES)
-    buy_cloth_amount = config.get("trade", {}).get("buy_cloth_amount", BUY_CLOTH_AMOUNT)
+    target_trades = config.get("trade", {}).get("target_trades")
+    if target_trades is None:
+        AddToSystemJournal("Error: 'target_trades' missing from config.")
+        return
+    buy_cloth_amount = config.get("trade", {}).get("buy_cloth_amount")
+    if buy_cloth_amount is None:
+        AddToSystemJournal("Error: 'buy_cloth_amount' missing from config.")
+        return
 
     consegna_serial = config.get("books", {}).get("Consegna", 0)
     rb_serial = config.get("travel", {}).get("RuneBook", 0)

@@ -49,7 +49,7 @@ TAILOR_ITEMS = {
     "studded leggings": (50, 23, 0x13DA, 12, "leather"),
     "studded tunic": (50, 30, 0x13DB, 14, "leather"),
     "studded bustier": (57, 23, 0x1C0C, 10, "leather"),
-    "studded armor": (57, 50, 0x1C02, 14, "leather"),
+    "studded armor": (57, 37, 0x1C02, 14, "leather"),
     "bone helmet": (64, 2, 0x141B, 4, "bone"),
     "bone gloves": (64, 9, 0x1417, 3, "bone"),
     "bone arms": (64, 16, 0x141D, 4, "bone"),
