@@ -312,28 +312,41 @@ class BodCyclerGUI(threading.Thread):
                 importlib.reload(BodCycler_Crafting)
                 BodCycler_Crafting.run_crafting_cycle()
                 
-                # STEP 2.5: Scan Conserva → Check Assembly → Auto-Assemble if sets ready
-                if STATS["status"] == "Stopped": break
-                self.set_global_status("Running (Scanning)")
-                ClientPrintEx(Self(), 1, 1, "Master: Scanning Conserva to sync inventory...")
+                # STEP 2.5: Optimized Assembly Check
+                # We skip the heavy Scanner.run_scanner() and rely on the live-updated inventory JSON.
+                if STATS["status"] == "Stopped": 
+                    return
+
                 try:
-                    import BodCycler_Scanner
-                    importlib.reload(BodCycler_Scanner)
                     import BodCycler_Assembler
                     importlib.reload(BodCycler_Assembler)
-                    BodCycler_Scanner.run_scanner()
-
-                    if STATS["status"] != "Stopped" and os.path.exists(INVENTORY_FILE):
+                    
+                    if os.path.exists(INVENTORY_FILE):
                         self.set_global_status("Running (Assembly Check)")
-                        ClientPrintEx(Self(), 1, 1, "Master: Checking Assembly readiness...")
+                        ClientPrintEx(Self(), 1, 1, "Master: Checking local inventory for sets...")
+                        
+                        # Load the existing inventory without re-scanning the world
                         with open(INVENTORY_FILE, "r") as _f:
                             _inv = json.load(_f)
+                            
+                        # find_completable_sets is light and fast
                         _sets = BodCycler_Assembler.find_completable_sets(_inv)
+                        
                         if _sets:
-                            AddToSystemJournal(f"Assembly: {len(_sets)} set(s) ready. Running Assembler...")
+                            AddToSystemJournal(f"Assembly: {len(_sets)} set(s) ready in JSON. Running Assembler...")
+                            self.set_global_status("Running (Assembling)")
+                            
+                            # The Assembler will still verify items exist before pulling them
                             BodCycler_Assembler.run_assembler()
                         else:
-                            AddToSystemJournal("Assembly: No complete sets ready.")
+                            AddToSystemJournal("Assembly: No complete sets found in local records.")
+                    else:
+                        # Fallback: If no inventory file exists, we MUST scan once to build it
+                        AddToSystemJournal("Assembly: Inventory file missing. Running one-time scan...")
+                        import BodCycler_Scanner
+                        importlib.reload(BodCycler_Scanner)
+                        BodCycler_Scanner.run_scanner()
+                        
                 except Exception as _e:
                     AddToSystemJournal(f"Assembly step failed: {_e}")
 
