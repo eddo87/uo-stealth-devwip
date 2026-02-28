@@ -58,7 +58,7 @@ DEFAULT_CONFIG = {
         "Origine": 0,   "Conserva": 0,  "Riprova": 0,   "Consegna": 0,  "Scartare": 0
     },
     "containers": {
-        "MaterialCrate": 0, "TrashBarrel": 0, "ClothDyeTub": 0
+        "MaterialCrate": 0, "TrashBarrel": 0, "ClothDyeTub": 0, "RewardCrate": 0
     },
     "travel": {
         "RuneBook": 0, "Method": "Recall",
@@ -417,6 +417,7 @@ class BodCyclerGUI(threading.Thread):
             ("MaterialCrate", "Material Crate"),
             ("TrashBarrel", "Trash Barrel"),
             ("ClothDyeTub", "Cloth Dye Tub"),
+            ("RewardCrate", "Reward Crate"),
             ("RuneBook", "RuneBook")
         ]
         

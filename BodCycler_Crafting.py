@@ -371,7 +371,7 @@ def check_and_pull_materials(material, qty_to_craft, item_cost, crate_serial):
     if bp_qty >= required_units: 
         return True
     
-    AddToSystemJournal(f"Low on {material} (Need {required_units}, Have {bp_qty}). Pulling from crate...")
+    AddToSystemJournal(f"Pulling {material} from crate...")
     if crate_serial != 0:
         UseObject(crate_serial)
         Wait(1000)
@@ -395,7 +395,7 @@ def check_and_pull_materials(material, qty_to_craft, item_cost, crate_serial):
                 return True
                 
             amount_needed_now = required_units - current_bp_qty
-            pull_amt = max(400, amount_needed_now)
+            pull_amt = required_units + 40
             MoveItem(stack, pull_amt, Backpack(), 0, 0, 0)
             Wait(1200)
             
@@ -447,6 +447,7 @@ def craft_items_until_done(bod_serial, tool_type, cat_identifier, item_identifie
     made_valid = count_valid_backpack_items(current_target_id, is_except)
     attempts = 0
     make_last_ready = False
+    AddToSystemJournal(f"Crafing {item_name}")
     
     while made_valid < qty_needed and attempts < (qty_needed * 3):
         if check_abort(): 
@@ -456,7 +457,7 @@ def craft_items_until_done(bod_serial, tool_type, cat_identifier, item_identifie
         world_save_guard()
         attempts += 1
         
-        FindType(tool_type, Backpack())
+        FindTypeEx(tool_type, 0x0000, Backpack())
         if FindCount() == 0: 
             AddToSystemJournal("Out of tools!")
             return False
@@ -483,7 +484,7 @@ def craft_items_until_done(bod_serial, tool_type, cat_identifier, item_identifie
             if wait_for_gump(CRAFT_GUMP_ID, 5000) == -1:
                 AddToSystemJournal("Gump did not refresh.")
         else:
-            if mat_btn is not None and mat_btn != 6:
+            if mat_btn is not None:
                 NumGumpButton(idx, 7)
                 Wait(800)
                 idx = wait_for_gump(CRAFT_GUMP_ID, 5000)
@@ -553,7 +554,7 @@ def craft_items_until_done(bod_serial, tool_type, cat_identifier, item_identifie
         
         recycle_invalid_items(current_target_id, is_except, tool_type)
         made_valid = count_valid_backpack_items(current_target_id, is_except)
-        AddToSystemJournal(f"Crafting check: {made_valid}/{qty_needed} in bag.")
+        #AddToSystemJournal(f"Crafting check: {made_valid}/{qty_needed} in bag.")
         
     return made_valid >= qty_needed
 
@@ -695,7 +696,8 @@ def run_crafting_cycle():
             close_all_gumps()
             continue
 
-        if info['material'] == "bone" or info['is_large']:
+        BONE_ITEM_NAMES = {"bone helmet", "bone gloves", "bone arms", "bone leggings", "bone armor"}
+        if info['material'] == "bone" or info['is_large'] or info['item_name'] in BONE_ITEM_NAMES:
             dest = conserva if (info['prize_id'] and info['prize_id'] > 0) else scartare
             if dest == conserva:
                 if info['is_large']: 

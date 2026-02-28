@@ -2,6 +2,12 @@
   "project": "Stealth Client BOD Cycler",
   "status": "Beta - Full Cycle Master Orchestration Achieved",
   "key_learnings": [
+    "Architecture: BodCycler_Utils.py is the single source of truth for shared constants (BOD_TYPE, BOD_BOOK_TYPE, BOOK_GUMP_ID, NEXT_PAGE_BTN, CONFIG_FILE, STATS_FILE, INVENTORY_FILE, SUPPLY_FILE) and shared helpers (load_config, check_abort, close_all_gumps, wait_for_gump, wait_for_gump_serial_change, read_stats, write_stats, set_status). All other scripts import from it.",
+    "Architecture: BodCycler_NPC_Trade.py has its own local constants block (not in Utils) for NPC-Trade-specific values: NPC_TYPES=[0x0190,0x0191], CTX_BUY=1, CTX_BOD=3, BTN_ACCEPT_BOD=1, BTN_DROP_BOD_1=5, BOD_GUMP_ID_SMALL=0x9bade6ea, BOD_GUMP_ID_LARGE=0xbe0dad1e, CLOTH_1=0x1766, CLOTH_2=0x1767, BOLT_OF_CLOTH_IDS=[0x0F95,0x0F97,0x0F9B,0x0F9C], SCISSORS=0x0F9E, OIL_CLOTH=0x175D, SANDALS=0x170D, BOOK_TYPE=0x2259.",
+    "Architecture: BodCycler_NPC_Trade.py reads target_trades and buy_cloth_amount strictly from config (no hardcoded fallbacks) — if missing from config, the function logs an error and returns.",
+    "Crafting Material Reset: craft_items_until_done must ALWAYS navigate to the Resources tab and set the material on the first item (make_last_ready=False), including mat_btn=6 (Normal). If skipped for Normal, the gump retains the previous BOD's colored material (e.g. Spined), causing Normal BODs to craft with the wrong material. Only 'Make Last' (make_last_ready=True) can safely skip resource navigation, since the material is baked into that action.",
+    "Crafting Bug (Fixed): The 'make_last_ready' flag pattern must be used — not 'if attempts > 1'. make_last_ready is set to True only AFTER confirming a new item appeared in the backpack (serial diff before/after). Blindly using Make Last (btn 21) from the 2nd attempt causes the gump to loop without ever navigating to the correct item.",
+    "Refactor History: The dev branch Utils refactor lost several NPC_Trade constants that were module-level in the original ac5cb99 working-beta commit. When the Utils import was added, the local constants were not preserved. Future refactors must audit all usages before removing local definitions.",
     "Stealth API: Use FindCount() not GetFindCount()",
     "Stealth API: CloseSimpleGump must be iterated backwards",
     "Gump Parsing: 'Amount' field is plain text (GumpText), others are HTML (XmfHTMLGumpColor)",
@@ -48,12 +54,17 @@
     {
       "filename": "BodCycler_Crafting.py",
       "description": "Intelligently extracts BODs, checks missing quantities, pulls needed materials from the crate, crafts items cleanly, and fills the BOD.",
-      "content": "Includes tooltip lag workarounds, crash recovery (checking bag for existing BODs), aggressive UI clearing, and JSON stat tracking."
+      "content": "Standalone (not using BodCycler_Utils). Imports from bod_data, bod_crafting_data, BodCycler_Item_Verification. Key logic: make_last_ready flag, mat_btn!=6 guard for Resources tab navigation, item serial diff for craft detection, Verifier.test_item_acceptance() for ID mismatch resolution."
+    },
+    {
+      "filename": "BodCycler_Item_Verification.py",
+      "description": "Helper module imported by BodCycler_Crafting.py to verify crafted items are accepted by BODs.",
+      "content": "test_item_acceptance(): opens BOD gump, presses Combine (ReturnValue==2), targets item, checks tooltip progress delta (retries 3x). get_bod_progress(): parses tooltip to extract current fill count."
     },
     {
       "filename": "BodCycler_NPC_Trade.py",
       "description": "Handles the core trade cycle. Drops Consegna BODs onto Tailor, accepts new BODs, files them to Origine, buys cloth bolts using fallbacks, cuts them, and recalls home.",
-      "content": "Uses SetContextMenuHook to trigger NPC interactions, AutoBuy logic with fallback IDs, and backup location recalls."
+      "content": "Imports shared helpers from BodCycler_Utils. Has a local constants block for NPC-Trade-specific values. target_trades and buy_cloth_amount are required from config (no fallback). SetContextMenuHook for NPC interactions, AutoBuy with fallback IDs, backup location recalls."
     }
   ]
 }

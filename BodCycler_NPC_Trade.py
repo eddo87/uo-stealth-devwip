@@ -20,6 +20,30 @@ from BodCycler_Utils import (
     read_stats, write_stats, set_status
 )
 
+NPC_TYPES = [0x0190, 0x0191]       # Male/Female human
+CTX_BUY = 1                        # Context Menu entry for 'Buy'
+CTX_BOD = 3                        # Context Menu entry for 'Bulk Order Info'
+BTN_ACCEPT_BOD = 1                 # 'Accept' button on BOD offer gump
+BTN_DROP_BOD_1 = 5                 # First 'Drop' button inside a BOD book
+BOD_GUMP_ID_SMALL = 0x9bade6ea    # Small BOD gump ID
+BOD_GUMP_ID_LARGE = 0xbe0dad1e    # Large BOD gump ID
+CLOTH_1 = 0x1766
+CLOTH_2 = 0x1767
+BOLT_OF_CLOTH_IDS = [0x0F95, 0x0F97, 0x0F9B, 0x0F9C]
+SCISSORS = 0x0F9E
+OIL_CLOTH = 0x175D
+SANDALS = 0x170D
+BOOK_TYPE = 0x2259                 # BOD Book type ID
+
+CONFIG_FILE = f"{StealthPath()}Scripts\\{CharName()}_bodcycler_config.json"
+
+
+def load_config():
+    if os.path.exists(CONFIG_FILE):
+        with open(CONFIG_FILE, "r") as f:
+            return json.load(f)
+    return None
+
 def find_tailor():
     SetFindDistance(10) 
     weavers, tailors = [], []
@@ -95,6 +119,11 @@ def sort_new_bods(config):
                     "prize_id": info.get('prize_id')
                 }
             elif scartare_serial != 0:
+                dest_book = scartare_serial
+                dest_name = "Scartare"
+        elif info.get('material', '').lower() == 'bone':
+            # Small bone BODs can't be crafted — route to Scartare
+            if scartare_serial != 0:
                 dest_book = scartare_serial
                 dest_name = "Scartare"
         else:
@@ -271,9 +300,20 @@ def travel_to(runebook_serial, travel_method, rune_index):
         Wait(100)
     return False
 
-def process_prizes_at_home(trash_serial, crate_serial, dye_tub_serial):
+def process_prizes_at_home(trash_serial, material_crate_serial, dye_tub_serial, reward_crate_serial, rb_serial=0):
+    """
+    Handles post-cycle cleanup. 
+    Args:
+        trash_serial: ID of the Trash Barrel.
+        material_crate_serial: ID for storing processed resources (Cloth).
+        reward_crate_serial: ID for storing high-value rewards (Runics/CBDs).
+        dye_tub_serial: ID of the Cloth Dye Tub.
+        rb_serial: ID of the Runebook to avoid moving it.
+    """
+
+    # 1. Clean up trash items
     if trash_serial != 0:
-        for junk_type in [OIL_CLOTH, SANDALS]:
+        for junk_type in [0x175D, 0x170D]: # OIL_CLOTH (0x175D), SANDALS (0x170D)
             FindType(junk_type, Backpack())
             for junk in GetFoundList():
                 if check_abort(): return
@@ -281,19 +321,51 @@ def process_prizes_at_home(trash_serial, crate_serial, dye_tub_serial):
                 MoveItem(junk, 0, trash_serial, 0, 0, 0)
                 Wait(800)
 
-    if crate_serial != 0:
-        for c_type in [CLOTH_1, CLOTH_2]:
+    # 2. Dye colored cloth and move to MATERIAL crate
+    if material_crate_serial != 0:
+        for c_type in [0x1766, 0x1767]: # CLOTH_1, CLOTH_2
             FindType(c_type, Backpack())
             for cloth in GetFoundList():
                 if check_abort(): return
                 world_save_guard()
-                if dye_tub_serial != 0:
+                if dye_tub_serial != 0 and GetColor(cloth) != 0x0000:
                     UseObject(dye_tub_serial)
                     WaitForTarget(2000)
-                    TargetToObject(cloth)
-                    Wait(600)
-                MoveItem(cloth, 0, crate_serial, 0, 0, 0)
+                    if TargetPresent():
+                        TargetToObject(cloth)
+                        Wait(600)
+                # Note: Cloth moves to material_crate_serial
+                MoveItem(cloth, 0, material_crate_serial, 0, 0, 0)
                 Wait(800)
+                
+    # 3. Move specific high-value rewards to REWARD crate
+    if reward_crate_serial != 0:
+        for prize_type in [0x14F0, 0x0F9D]:
+            FindType(prize_type, Backpack())
+            for item in GetFoundList():
+                if check_abort(): return
+                
+                i_color = GetColor(item)
+                should_move = False
+                
+                # Check Sewing Kits (0x0F9D) specifically for Barbed Runic color (0x0851)
+                if prize_type == 0x0F9D and i_color == 0x0851:
+                    should_move = True
+                    
+                # Check Deeds (0x14F0) for Clothing Bless Deed (Color 0x0000 + tooltip)
+                elif prize_type == 0x14F0 and i_color == 0x0000:
+                    tooltip = GetTooltip(item).lower()
+                    if "clothing bless deed" in tooltip:
+                        should_move = True
+                
+                # If it passed the checks, move it to the reward crate
+                if should_move:
+                    world_save_guard()
+                    print(item)
+                    print(reward_crate_serial)
+                    AddToSystemJournal(f"Moving reward item {hex(prize_type)} to Reward Crate.")
+                    MoveItem(item, 0, reward_crate_serial, 0, 0, 0)
+                    Wait(800)
 
 def execute_trade_loop():
     config = load_config()
@@ -317,6 +389,7 @@ def execute_trade_loop():
     trash_serial = config.get("containers", {}).get("TrashBarrel", 0)
     crate_serial = config.get("containers", {}).get("MaterialCrate", 0)
     dye_tub_serial = config.get("containers", {}).get("ClothDyeTub", 0)
+    reward_crate_serial = config.get("containers", {}).get("RewardCrate", 0)
 
     if consegna_serial == 0: return
 
@@ -369,7 +442,7 @@ def execute_trade_loop():
         if home_x != 0 and home_y != 0:
             newMoveXY(home_x, home_y, True, 0, True)
             
-        process_prizes_at_home(trash_serial, crate_serial, dye_tub_serial)
+        process_prizes_at_home(trash_serial, crate_serial, dye_tub_serial, reward_crate_serial, rb_serial)
         
     AddToSystemJournal("Route Complete. Cycle successful.")
 

@@ -35,9 +35,6 @@ prize_names = {
 prize_pattern = {
     # TAILORING (Specific Targets)
     "Male Leather Set": {
-        "Normal": {
-            "Leather": {20: 23}  # <--- NEW: Large Normal Leather 20 = CBD
-        },
         "Exceptional": {
             "Spined": {20: 24}, # Barbed Kit
             "Horned": {10: 24, 15: 24, 20: 24},
@@ -45,9 +42,6 @@ prize_pattern = {
         }
     },
     "Female Leather Set": {
-        "Normal": {
-            "Leather": {20: 23}  # <--- NEW: Large Normal Leather 20 = CBD
-        },
         "Exceptional": {
             "Spined": {20: 24}, # Barbed Kit
             "Horned": {10: 24, 15: 24, 20: 24},
