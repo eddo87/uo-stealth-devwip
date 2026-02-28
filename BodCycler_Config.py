@@ -52,7 +52,8 @@ DEFAULT_CONFIG = {
     "cycle_type": "Tailor", 
     "trade": {
         "target_trades": 2,
-        "buy_cloth_amount": 80
+        "buy_cloth_amount": 80,
+        "buy_cloth_enabled": True
     },
     "books": {
         "Origine": 0,   "Conserva": 0,  "Riprova": 0,   "Consegna": 0,  "Scartare": 0
@@ -94,7 +95,8 @@ class BodCyclerGUI(threading.Thread):
             if k not in self.config["containers"]: self.config["containers"][k] = 0
         if "home" not in self.config: self.config["home"] = {"X": 0, "Y": 0, "Z": 0}
         if "cycle_type" not in self.config: self.config["cycle_type"] = "Tailor"
-        if "trade" not in self.config: self.config["trade"] = {"target_trades": 2, "buy_cloth_amount": 80}
+        if "trade" not in self.config: self.config["trade"] = {"target_trades": 2, "buy_cloth_amount": 80, "buy_cloth_enabled": True}
+        if "buy_cloth_enabled" not in self.config["trade"]: self.config["trade"]["buy_cloth_enabled"] = True
 
     def save_config(self):
         for name, var in self.vars.items():
@@ -113,6 +115,8 @@ class BodCyclerGUI(threading.Thread):
         if "buy_cloth_amount" in self.vars:
             try: self.config["trade"]["buy_cloth_amount"] = int(self.vars["buy_cloth_amount"].get())
             except: pass
+        if "buy_cloth_enabled" in self.vars:
+            self.config["trade"]["buy_cloth_enabled"] = bool(self.vars["buy_cloth_enabled"].get())
 
         try:
             with open(CONFIG_FILE, "w") as f:
@@ -308,6 +312,31 @@ class BodCyclerGUI(threading.Thread):
                 importlib.reload(BodCycler_Crafting)
                 BodCycler_Crafting.run_crafting_cycle()
                 
+                # STEP 2.5: Scan Conserva → Check Assembly → Auto-Assemble if sets ready
+                if STATS["status"] == "Stopped": break
+                self.set_global_status("Running (Scanning)")
+                ClientPrintEx(Self(), 1, 1, "Master: Scanning Conserva to sync inventory...")
+                try:
+                    import BodCycler_Scanner
+                    importlib.reload(BodCycler_Scanner)
+                    import BodCycler_Assembler
+                    importlib.reload(BodCycler_Assembler)
+                    BodCycler_Scanner.run_scanner()
+
+                    if STATS["status"] != "Stopped" and os.path.exists(INVENTORY_FILE):
+                        self.set_global_status("Running (Assembly Check)")
+                        ClientPrintEx(Self(), 1, 1, "Master: Checking Assembly readiness...")
+                        with open(INVENTORY_FILE, "r") as _f:
+                            _inv = json.load(_f)
+                        _sets = BodCycler_Assembler.find_completable_sets(_inv)
+                        if _sets:
+                            AddToSystemJournal(f"Assembly: {len(_sets)} set(s) ready. Running Assembler...")
+                            BodCycler_Assembler.run_assembler()
+                        else:
+                            AddToSystemJournal("Assembly: No complete sets ready.")
+                except Exception as _e:
+                    AddToSystemJournal(f"Assembly step failed: {_e}")
+
                 # STEP 3: Travel, Trade, & Return
                 if STATS["status"] == "Stopped": break
                 self.set_global_status("Running (Trading)")
@@ -369,32 +398,38 @@ class BodCyclerGUI(threading.Thread):
         lf_log = LabelFrame(self.root, text="Logistics & Actions", padx=5, pady=5)
         lf_log.pack(fill="x", padx=10, pady=5)
 
+        # Mode row
         f_type = Frame(lf_log)
-        f_type.pack(fill="x", pady=5)
-        Button(lf_log, text="Check Assembly (JSON only)", command=self.check_assembly_readiness, bg="#B0E0E6", font=("Arial", 8)).pack(fill="x", padx=5, pady=(0, 4))
+        f_type.pack(fill="x", pady=(5, 2))
         self.vars["cycle_type"] = StringVar(value=self.config.get("cycle_type", "Tailor"))
         Label(f_type, text="Mode:").pack(side=LEFT, padx=2)
         Radiobutton(f_type, text="Tailor", variable=self.vars["cycle_type"], value="Tailor").pack(side=LEFT)
         Radiobutton(f_type, text="Smith", variable=self.vars["cycle_type"], value="Smith").pack(side=LEFT)
-        
-        # Action Buttons
-        Button(f_type, text="Trade", command=self.trigger_trade, bg="#90EE90").pack(side=RIGHT, padx=1)
-        Button(f_type, text="Craft", command=self.trigger_crafting, bg="#FFD700").pack(side=RIGHT, padx=1)
-        Button(f_type, text="Assemble", command=self.trigger_assemble, bg="#DDA0DD").pack(side=RIGHT, padx=1)
-        Button(f_type, text="Scan", command=self.trigger_scan, bg="#FFB6C1").pack(side=RIGHT, padx=1)
-        
 
-        # Configurable Variables for Trading
+        # Action buttons row: [Trades/Cycle entry | Trade | Craft]  ...  [Scan | Assemble | Check Prizes]
+        f_actions = Frame(lf_log)
+        f_actions.pack(fill="x", pady=(0, 4))
+
+        Label(f_actions, text="Trades/Cycle:").pack(side=LEFT, padx=(2, 1))
+        self.vars["target_trades"] = StringVar(value=str(self.config.get("trade", {}).get("target_trades", 2)))
+        Entry(f_actions, textvariable=self.vars["target_trades"], width=4).pack(side=LEFT, padx=(0, 4))
+        Button(f_actions, text="Trade", command=self.trigger_trade, bg="#90EE90").pack(side=LEFT, padx=1)
+        Button(f_actions, text="Craft", command=self.trigger_crafting, bg="#FFD700").pack(side=LEFT, padx=1)
+
+        Button(f_actions, text="Check Prizes", command=self.check_assembly_readiness, bg="#B0E0E6", font=("Arial", 8)).pack(side=RIGHT, padx=1)
+        Button(f_actions, text="Assemble", command=self.trigger_assemble, bg="#DDA0DD").pack(side=RIGHT, padx=1)
+        Button(f_actions, text="Scan", command=self.trigger_scan, bg="#FFB6C1").pack(side=RIGHT, padx=1)
+
+        # Buy Cloth row: ON/OFF radio + quantity entry
         f_trade_vars = Frame(lf_log)
         f_trade_vars.pack(fill="x", pady=2)
-        
-        Label(f_trade_vars, text="Trades/Cycle:").pack(side=LEFT, padx=2)
-        self.vars["target_trades"] = StringVar(value=str(self.config.get("trade", {}).get("target_trades", 2)))
-        Entry(f_trade_vars, textvariable=self.vars["target_trades"], width=4).pack(side=LEFT, padx=2)
-        
-        Label(f_trade_vars, text="Buy Cloth:").pack(side=LEFT, padx=(15,2))
+
+        Label(f_trade_vars, text="Buy Cloth:").pack(side=LEFT, padx=(2, 2))
+        self.vars["buy_cloth_enabled"] = BooleanVar(value=bool(self.config.get("trade", {}).get("buy_cloth_enabled", True)))
+        Radiobutton(f_trade_vars, text="ON", variable=self.vars["buy_cloth_enabled"], value=True).pack(side=LEFT)
+        Radiobutton(f_trade_vars, text="OFF", variable=self.vars["buy_cloth_enabled"], value=False).pack(side=LEFT)
         self.vars["buy_cloth_amount"] = StringVar(value=str(self.config.get("trade", {}).get("buy_cloth_amount", 80)))
-        Entry(f_trade_vars, textvariable=self.vars["buy_cloth_amount"], width=5).pack(side=LEFT, padx=2)
+        Entry(f_trade_vars, textvariable=self.vars["buy_cloth_amount"], width=5).pack(side=LEFT, padx=(6, 2))
 
         f_supplies = Frame(lf_log, bg="#eef")
         f_supplies.pack(fill="x", pady=5, padx=5)

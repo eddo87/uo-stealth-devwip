@@ -375,10 +375,8 @@ def execute_trade_loop():
     if target_trades is None:
         AddToSystemJournal("Error: 'target_trades' missing from config.")
         return
-    buy_cloth_amount = config.get("trade", {}).get("buy_cloth_amount")
-    if buy_cloth_amount is None:
-        AddToSystemJournal("Error: 'buy_cloth_amount' missing from config.")
-        return
+    buy_cloth_amount = config.get("trade", {}).get("buy_cloth_amount", 80)
+    buy_cloth_enabled = config.get("trade", {}).get("buy_cloth_enabled", True)
 
     consegna_serial = config.get("books", {}).get("Consegna", 0)
     rb_serial = config.get("travel", {}).get("RuneBook", 0)
@@ -435,7 +433,10 @@ def execute_trade_loop():
             break
             
     if not check_abort():
-        buy_and_cut_cloth(target_npc, buy_cloth_amount)
+        if buy_cloth_enabled:
+            buy_and_cut_cloth(target_npc, buy_cloth_amount)
+        else:
+            AddToSystemJournal("Buy Cloth: OFF — skipping.")
         ws1_index = config.get("travel", {}).get("Runes", {}).get("WorkSpot1", 1)
         travel_to(rb_serial, travel_method, ws1_index)
         
