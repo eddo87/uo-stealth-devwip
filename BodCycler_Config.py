@@ -7,7 +7,7 @@ import importlib
 import BodCycler_AI_Debugger
 from tkinter import *
 from datetime import datetime
-from BodCycler_Utils import set_status
+from BodCycler_Utils import set_status, read_stats, write_stats
 
 # Import the logic modules
 try:
@@ -257,6 +257,7 @@ class BodCyclerGUI(threading.Thread):
                         self.vars["stat_crafted"].set(f"BODs Filled: {data.get('crafted', 0)}")
                         self.vars["stat_small"].set(f"Small Prizes: {data.get('prized_small', 0)}")
                         self.vars["stat_large"].set(f"Large Prizes: {data.get('prized_large', 0)}")
+                        self.vars["stat_prizes"].set(f"Prizes: {data.get('prizes_dropped', 0)}")
                     self.last_stats_mtime = mtime
         except Exception:
             pass
@@ -266,8 +267,10 @@ class BodCyclerGUI(threading.Thread):
         data["crafted"] = 0
         data["prized_small"] = 0
         data["prized_large"] = 0
+        data["prizes_dropped"] = 0
         data["mats_used"] = {}
         data["recovery_success"] = 0
+        data["session_start"] = time.time()
         write_stats(data)
         self.read_stats_file()
 
@@ -296,6 +299,21 @@ class BodCyclerGUI(threading.Thread):
         AddToSystemJournal("=== MASTER CYCLE INITIATED ===")
         while STATS["status"] != "Stopped":
             try:
+                # BOD COLLECTION WINDOW CHECK (runs at :59 to :05 each hour)
+                try:
+                    import BodCycler_TakeBods
+                    importlib.reload(BodCycler_TakeBods)
+                    if BodCycler_TakeBods.should_collect_bods():
+                        self.set_global_status("Running (BOD Collection)")
+                        AddToSystemJournal("BOD Collection window! Handing off to collectors [ed2][ed3][ed5]...")
+                        BodCycler_TakeBods.run_take_bods_cycle()
+                        while BodCycler_TakeBods.should_collect_bods():
+                            if STATS["status"] == "Stopped": return
+                            time.sleep(10)
+                        AddToSystemJournal("BOD Collection complete. Resuming crafting cycle.")
+                except Exception as _te:
+                    AddToSystemJournal(f"TakeBods check skipped: {_te}")
+
                 # STEP 1: Check Supplies & Maintain Tools
                 if STATS["status"] == "Stopped": break
                 self.set_global_status("Running (Supplies)")
@@ -381,11 +399,12 @@ class BodCyclerGUI(threading.Thread):
         if STATS["status"] != "Idle" and STATS["status"] != "Stopped" and "Running" in STATS["status"]:
             AddToSystemJournal("Cycle is already running!")
             return
-            
+
         STATS["start_time"] = datetime.now()
         self.set_global_status("Running")
         self.save_config()
-        
+        self.reset_stats()
+
         # Launch the orchestrator in the background so the GUI doesn't freeze
         threading.Thread(target=self.master_cycle_thread, daemon=True).start()
 
@@ -534,12 +553,17 @@ class BodCyclerGUI(threading.Thread):
         self.vars["stat_crafted"] = StringVar(value="BODs Filled: 0")
         self.vars["stat_small"] = StringVar(value="Small Prizes: 0")
         self.vars["stat_large"] = StringVar(value="Large Prizes: 0")
-        
+        self.vars["stat_prizes"] = StringVar(value="Prizes: 0")
+
         f_metric = Frame(lf_stats)
         f_metric.pack(fill="x", pady=2)
         Label(f_metric, textvariable=self.vars["stat_crafted"], fg="darkblue", font=("Arial", 10, "bold")).pack(side=LEFT, expand=True)
         Label(f_metric, textvariable=self.vars["stat_small"], fg="darkgreen", font=("Arial", 10, "bold")).pack(side=LEFT, expand=True)
         Label(f_metric, textvariable=self.vars["stat_large"], fg="darkmagenta", font=("Arial", 10, "bold")).pack(side=LEFT, expand=True)
+
+        f_metric2 = Frame(lf_stats)
+        f_metric2.pack(fill="x", pady=(0, 2))
+        Label(f_metric2, textvariable=self.vars["stat_prizes"], fg="darkorange", font=("Arial", 10, "bold")).pack(side=LEFT, expand=True)
         
         Button(lf_stats, text="Reset Stats", command=self.reset_stats, font=("Arial", 8)).pack(pady=4)
 

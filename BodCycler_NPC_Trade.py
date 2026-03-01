@@ -6,6 +6,7 @@ from datetime import datetime
 from bod_data import *
 
 import BodCycler_Crafting
+import BodCycler_AI_Debugger
 try:
     from checkWorldSave import world_save_guard
 except ImportError:
@@ -361,11 +362,17 @@ def process_prizes_at_home(trash_serial, material_crate_serial, dye_tub_serial, 
                 # If it passed the checks, move it to the reward crate
                 if should_move:
                     world_save_guard()
-                    print(item)
-                    print(reward_crate_serial)
-                    AddToSystemJournal(f"Moving reward item {hex(prize_type)} to Reward Crate.")
+                    if prize_type == 0x0F9D and i_color == 0x0851:
+                        prize_name = "Barbed Runic Kit"
+                    else:
+                        prize_name = "Clothing Bless Deed"
+                    AddToSystemJournal(f"Moving {prize_name} to Reward Crate.")
                     MoveItem(item, 0, reward_crate_serial, 0, 0, 0)
                     Wait(800)
+                    stats = read_stats()
+                    stats["prizes_dropped"] = stats.get("prizes_dropped", 0) + 1
+                    write_stats(stats)
+                    BodCycler_AI_Debugger.send_prize_notification(prize_name)
 
 def execute_trade_loop():
     config = load_config()

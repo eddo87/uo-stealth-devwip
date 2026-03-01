@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import time
 import requests
@@ -14,7 +15,7 @@ load_dotenv()
 CF_ACCOUNT_ID = os.getenv("CF_ACCOUNT_ID")
 CF_API_TOKEN = os.getenv("CF_API_TOKEN")
 DISCORD_WEBHOOK = os.getenv("DISCORD_WEBHOOK")
-MODEL = os.getenv("MODEL_ANALYSIS", "@cf/meta/llama-3.1-8b-instruct")
+MODEL = os.getenv("MODEL_ANALYSIS", "@cf/deepseek-ai/deepseek-r1-distill-qwen-32b")
 
 # Dynamically set the file paths to match the main scripts (e.g. LA FABBRICA_bodcycler_stats.json)
 try:
@@ -45,7 +46,9 @@ def call_cloudflare_ai(prompt, system_instruction="You are a helpful assistant f
             response = requests.post(url, headers=headers, json=cf_payload, timeout=15)
             if response.status_code == 200:
                 result = response.json()
-                return result.get("result", {}).get("response", "No response from AI.")
+                response_text = result.get("result", {}).get("response", "No response from AI.")
+                response_text = re.sub(r'<think>.*?</think>', '', response_text, flags=re.DOTALL).strip()
+                return response_text
             elif response.status_code == 429: # Rate limit
                 time.sleep(2**i)
             else:
@@ -105,6 +108,25 @@ def evaluate_riprova_queue(riprova_list):
             retry_list.append(bod)
             
     return retry_list
+
+def send_prize_notification(prize_name: str):
+    """Sends an instant Discord alert when a prize is secured into the Reward Crate."""
+    if not DISCORD_WEBHOOK:
+        return
+    payload = {
+        "username": "BOD Cycler Intelligence",
+        "embeds": [{
+            "title": "🏆 Prize Secured!",
+            "description": f"**{prize_name}** dropped into the Reward Crate.",
+            "color": 16766720,  # Gold
+            "footer": {"text": datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+        }]
+    }
+    try:
+        requests.post(DISCORD_WEBHOOK, json=payload, timeout=10)
+    except Exception as e:
+        print(f"Discord prize notification failed: {e}")
+
 
 def send_discord_session_report():
     """Sends a detailed Discord report tracking specific materials used, speed, and rewards."""

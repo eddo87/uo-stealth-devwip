@@ -315,6 +315,11 @@ def run_assembler():
         except Exception as e:
             AddToSystemJournal(f"State Management Error: Could not update JSON. {e}")
 
+    if sets_completed > 0:
+        stats = read_stats()
+        stats["prized_large"] = stats.get("prized_large", 0) + sets_completed
+        write_stats(stats)
+
     return sets_completed
 
 

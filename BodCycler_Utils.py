@@ -64,7 +64,7 @@ def read_stats():
     """Reads the stats file. Returns a dict with safe defaults."""
     defaults = {
         "crafted": 0, "prized_small": 0, "prized_large": 0,
-        "recovery_success": 0, "mats_used": {}, "status": "Idle"
+        "prizes_dropped": 0, "recovery_success": 0, "mats_used": {}, "status": "Idle"
     }
     if os.path.exists(STATS_FILE):
         for _ in range(5):          # retry loop for write-lock races
