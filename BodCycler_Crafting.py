@@ -15,6 +15,7 @@ if script_dir not in sys.path:
 from bod_data import categorize_items, get_prize_number
 from bod_crafting_data import TAILOR_ITEMS, MATERIAL_MAP
 import BodCycler_Item_Verification as Verifier
+import BodCycler_AI_Debugger
 
 try:
     from checkWorldSave import world_save_guard
@@ -665,7 +666,28 @@ def run_crafting_cycle():
     if crate != 0:
         UseObject(crate)
         Wait(1000)
-        
+
+    # Auto-replenish Origine from BODCrate if low
+    bod_crate = config.get("containers", {}).get("BODCrate", 0)
+    if bod_crate != 0:
+        FindType(BOD_TYPE, origine)
+        origine_count = FindCount()
+        needed = target_trades - origine_count
+        if needed > 0:
+            AddToSystemJournal(f"Origine low ({origine_count}/{target_trades}). Attempting to refill from BODCrate...")
+            FindTypeEx(BOD_TYPE, 0x0483, bod_crate)  # Tailor BOD color = 0x0483
+            available = GetFoundList()[:needed]
+            moved = 0
+            for extra_bod in available:
+                if check_abort():
+                    break
+                MoveItem(extra_bod, 1, origine, 0, 0, 0)
+                Wait(800)
+                moved += 1
+            if moved > 0:
+                AddToSystemJournal(f"Origine refilled: pulled {moved} BODs from BODCrate.")
+                BodCycler_AI_Debugger.send_error_alert("origine_refill", f"{moved} BODs", f"was {origine_count}/{target_trades}", True)
+
     for i in range(target_trades):
         if check_abort(): 
             break
@@ -731,11 +753,27 @@ def run_crafting_cycle():
             success = craft_items_until_done(bod, tool_type, cat_identifier, item_identifier, info['item_name'], item_id, info['qty_needed'], info['is_except'], mat_btn)
             close_all_gumps()
             
-            if not success: 
-                MoveItem(bod, 0, riprova, 0, 0, 0)
-                Wait(1000)
-                close_all_gumps()
-                continue
+            if not success:
+                # Check if resources are still available — if so, retry once (likely input lag)
+                has_resources = check_and_pull_materials(info['material'], to_make, item_cost, crate)
+                if has_resources:
+                    AddToSystemJournal(f"Crafting failed but resources available — retrying {info['item_name']}...")
+                    success = craft_items_until_done(bod, tool_type, cat_identifier, item_identifier, info['item_name'], item_id, info['qty_needed'], info['is_except'], mat_btn)
+                    close_all_gumps()
+                    if not success:
+                        # Still failed after retry
+                        BodCycler_AI_Debugger.send_error_alert("crafting_failure", info['item_name'], info['material'], True)
+                        MoveItem(bod, 0, riprova, 0, 0, 0)
+                        Wait(1000)
+                        close_all_gumps()
+                        continue
+                else:
+                    # Resources missing — true shortage
+                    BodCycler_AI_Debugger.send_error_alert("riprova", info['item_name'], info['material'], False)
+                    MoveItem(bod, 0, riprova, 0, 0, 0)
+                    Wait(1000)
+                    close_all_gumps()
+                    continue
             
         is_full = fill_bod_completely(bod, item_id, info['qty_needed'], info['item_name'], info['is_except'])
                      
@@ -745,12 +783,28 @@ def run_crafting_cycle():
             session_crafted += 1
             dest = conserva if (info['prize_id'] and info['prize_id'] > 0) else consegna
             if dest == conserva:
-                if info['is_large']: 
+                if info['is_large']:
                     session_large += 1
-                else: 
+                else:
                     session_small += 1
         else:
-            dest = riprova
+            # BOD fill failed — retry once in case it was a gump lag/timing issue
+            AddToSystemJournal(f"BOD fill failed for {info['item_name']} — retrying once...")
+            is_full = fill_bod_completely(bod, item_id, info['qty_needed'], info['item_name'], info['is_except'])
+            close_all_gumps()
+            if is_full:
+                session_crafted += 1
+                dest = conserva if (info['prize_id'] and info['prize_id'] > 0) else consegna
+                if dest == conserva:
+                    if info['is_large']:
+                        session_large += 1
+                    else:
+                        session_small += 1
+                BodCycler_AI_Debugger.send_error_alert("fill_retry_success", info['item_name'], info['material'], True)
+            else:
+                # Retry also failed
+                BodCycler_AI_Debugger.send_error_alert("fill_failure", info['item_name'], info['material'], True)
+                dest = riprova
             
         MoveItem(bod, 0, dest, 0, 0, 0)
         Wait(1000)

@@ -15,6 +15,7 @@ load_dotenv()
 CF_ACCOUNT_ID = os.getenv("CF_ACCOUNT_ID")
 CF_API_TOKEN = os.getenv("CF_API_TOKEN")
 DISCORD_WEBHOOK = os.getenv("DISCORD_WEBHOOK")
+MODEL_FAST = os.getenv("MODEL_FAST", "@cf/meta/llama-3.1-8b-instruct-fast")
 MODEL = os.getenv("MODEL_ANALYSIS", "@cf/deepseek-ai/deepseek-r1-distill-qwen-32b")
 
 # Dynamically set the file paths to match the main scripts (e.g. LA FABBRICA_bodcycler_stats.json)
@@ -27,36 +28,46 @@ STATS_FILE = f"{PREFIX}bodcycler_stats.json"
 SUPPLY_FILE = f"{PREFIX}bodcycler_supplies.json"
 LEARNING_DB = f"{PREFIX}learning_engine.json"
 
-def call_cloudflare_ai(prompt, system_instruction="You are a helpful assistant for an Ultima Online bot developer."):
-    """Calls Cloudflare Workers AI with exponential backoff."""
+def _call_cf(model, prompt, system_instruction, max_tokens=256, timeout=10):
+    """Private helper: calls Cloudflare Workers AI with exponential backoff and <think> stripping."""
     if not CF_ACCOUNT_ID or not CF_API_TOKEN:
         return "AI API credentials not configured."
-        
-    url = f"https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}/ai/run/{MODEL}"
+
+    url = f"https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}/ai/run/{model}"
     headers = {"Authorization": f"Bearer {CF_API_TOKEN}"}
     cf_payload = {
         "messages": [
             {"role": "system", "content": system_instruction},
             {"role": "user", "content": prompt}
-        ]
+        ],
+        "max_tokens": max_tokens
     }
 
-    for i in range(5): # 5 retries
+    for i in range(5):
         try:
-            response = requests.post(url, headers=headers, json=cf_payload, timeout=15)
+            response = requests.post(url, headers=headers, json=cf_payload, timeout=timeout)
             if response.status_code == 200:
                 result = response.json()
                 response_text = result.get("result", {}).get("response", "No response from AI.")
-                response_text = re.sub(r'<think>.*?</think>', '', response_text, flags=re.DOTALL).strip()
+                response_text = re.sub(r'<think>.*?</think>', '', response_text, flags=re.DOTALL)
+                response_text = re.sub(r'<think>.*', '', response_text, flags=re.DOTALL)
+                response_text = response_text.strip()
+                if not response_text:
+                    response_text = "No response."
                 return response_text
-            elif response.status_code == 429: # Rate limit
+            elif response.status_code == 429:
                 time.sleep(2**i)
             else:
-                return f"Error: {response.status_code} - {response.text}"
+                return f"Error: {response.status_code}"
         except Exception as e:
             time.sleep(2**i)
-    
+
     return "AI request failed after 5 retries."
+
+
+def call_cloudflare_ai(prompt, system_instruction="You are a helpful assistant for an Ultima Online bot developer."):
+    """Calls Cloudflare Workers AI (deep analysis, ~60s timeout)."""
+    return _call_cf(MODEL, prompt, system_instruction, max_tokens=2048, timeout=90)
 
 def log_failure(item_name, reason, material):
     """Logs a failure to the learning engine to track efficiency."""
@@ -126,6 +137,40 @@ def send_prize_notification(prize_name: str):
         requests.post(DISCORD_WEBHOOK, json=payload, timeout=10)
     except Exception as e:
         print(f"Discord prize notification failed: {e}")
+
+
+def send_error_alert(event_type, bod_name, detail, had_resources):
+    """Sends a Discord alert for error-handling events (retry, riprova, origine refill)."""
+    if not DISCORD_WEBHOOK:
+        return
+
+    # Use fast model to generate a 1-sentence explanation
+    prompt = (
+        f"UO bot event '{event_type}': BOD '{bod_name}', detail '{detail}', "
+        f"resources {'available' if had_resources else 'missing'}. "
+        f"In one sentence, explain what happened and why."
+    )
+    msg = _call_cf(MODEL_FAST, prompt,
+                   "You are a concise UO bot assistant. Reply with exactly one sentence only.",
+                   max_tokens=80, timeout=10)
+
+    # Choose color: orange=lag/recoverable, red=shortage
+    color = 0xFFA500 if had_resources else 0xFF4444
+
+    payload = {
+        "username": "BOD Cycler Intelligence",
+        "embeds": [{
+            "title": f"⚠️ {event_type.replace('_', ' ').title()}",
+            "description": msg,
+            "color": color,
+            "footer": {"text": datetime.now().strftime('%H:%M:%S')}
+        }]
+    }
+
+    try:
+        requests.post(DISCORD_WEBHOOK, json=payload, timeout=10)
+    except Exception as e:
+        print(f"Discord error alert failed: {e}")
 
 
 def send_discord_session_report():
