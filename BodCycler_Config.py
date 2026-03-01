@@ -59,7 +59,7 @@ DEFAULT_CONFIG = {
         "Origine": 0,   "Conserva": 0,  "Riprova": 0,   "Consegna": 0,  "Scartare": 0
     },
     "containers": {
-        "MaterialCrate": 0, "TrashBarrel": 0, "ClothDyeTub": 0, "RewardCrate": 0, "BODCrate": 0
+        "MaterialCrate": 0, "TrashBarrel": 0, "ClothDyeTub": 0, "RewardCrate": 0, "BodBookCrate": 0
     },
     "travel": {
         "RuneBook": 0, "Method": "Recall",
@@ -306,6 +306,13 @@ class BodCyclerGUI(threading.Thread):
                     if BodCycler_TakeBods.should_collect_bods():
                         self.set_global_status("Running (BOD Collection)")
                         AddToSystemJournal("BOD Collection window! Handing off to collectors [ed2][ed3][ed5]...")
+                        home = self.config.get("home", {})
+                        hx, hy = home.get("X", 0), home.get("Y", 0)
+                        if hx and hy:
+                            AddToSystemJournal(f"Walking ed4 home ({hx},{hy}) before handoff...")
+                            newMoveXY(hx, hy, False, 1, True)
+                            time.sleep(2)
+                        Disconnect()
                         BodCycler_TakeBods.run_take_bods_cycle()
                         while BodCycler_TakeBods.should_collect_bods():
                             if STATS["status"] == "Stopped": return
@@ -485,7 +492,7 @@ class BodCyclerGUI(threading.Thread):
             ("TrashBarrel", "Trash Barrel"),
             ("ClothDyeTub", "Cloth Dye Tub"),
             ("RewardCrate", "Reward Crate"),
-            ("BODCrate", "BOD Crate (Origine Refill)"),
+            ("BodBookCrate", "BodBook Crate"),
             ("RuneBook", "RuneBook")
         ]
         
@@ -506,10 +513,13 @@ class BodCyclerGUI(threading.Thread):
         spot_txt = f"Home: {hx}, ..." if hx != 0 else "Home: Not Set"
         spot_fg = "blue" if hx != 0 else "red"
         lbl_spot = Label(f_targets, text=spot_txt, fg=spot_fg, width=25, anchor="w")
-        lbl_spot.grid(row=4, column=0, padx=5, pady=5)
+        
+        # --- FIX: Set the home items to automatically go to the row below the targets list ---
+        home_row = len(targets)
+        lbl_spot.grid(row=home_row, column=0, padx=5, pady=5)
         
         f_home_btns = Frame(f_targets)
-        f_home_btns.grid(row=4, column=1, padx=5, pady=5)
+        f_home_btns.grid(row=home_row, column=1, padx=5, pady=5)
         Button(f_home_btns, text="Set", width=4, command=lambda: self.set_home_spot(lbl_spot)).pack(side=LEFT, padx=1)
         Button(f_home_btns, text="Go To", width=5, command=self.go_to_home_spot).pack(side=LEFT, padx=1)
 

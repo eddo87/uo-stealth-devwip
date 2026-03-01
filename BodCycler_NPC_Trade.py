@@ -108,7 +108,10 @@ def sort_new_bods(config):
             if not is_scartare and conserva_serial != 0:
                 dest_book = conserva_serial
                 dest_name = "Conserva"
-                
+                stats = read_stats()
+                stats["prized_large"] = stats.get("prized_large", 0) + 1
+                write_stats(stats)
+
                 # Format exactly what the Assembler expects
                 parsed_bod = {
                     "type": "Large",

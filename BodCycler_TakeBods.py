@@ -26,7 +26,7 @@ MED_PAUSE  = 1200
 LONG_PAUSE = 2500
 
 # ---- Collection Window ----
-COLLECT_START_MINUTE = 59   # :59 of any hour
+COLLECT_START_MINUTE = 55   # :55 of any hour (widened to catch cycles that finish late)
 COLLECT_END_MINUTE   = 5    # :05 of next hour
 
 

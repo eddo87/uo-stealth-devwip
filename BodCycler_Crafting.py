@@ -16,6 +16,7 @@ from bod_data import categorize_items, get_prize_number
 from bod_crafting_data import TAILOR_ITEMS, MATERIAL_MAP
 import BodCycler_Item_Verification as Verifier
 import BodCycler_AI_Debugger
+import BodCycler_Assembler
 
 try:
     from checkWorldSave import world_save_guard
@@ -29,6 +30,7 @@ BODS_TO_PROCESS = 5
 
 # --- Constants ---
 BOD_TYPE = 0x2258
+BOD_BOOK_TYPE = 0x2259
 BOOK_GUMP_ID = 0x54F555DF
 CRAFT_GUMP_ID = 0x38920abd
 
@@ -183,7 +185,57 @@ def find_button_for_text(gump_data, text_to_find):
     return None
 
 
-def extract_bod_from_origine(origine_serial):
+def _parse_book_count(tooltip: str) -> int:
+    """Extract the BOD count from a BOD book tooltip. Returns -1 if not found.
+    Confirmed format: 'Bulk Order Book|Blessed|Weight: 1 stone|Deeds in book: 392|Book Name: TAILOR'
+    """
+    m = re.search(r'deeds in book[:\s]+(\d+)', tooltip, re.IGNORECASE)
+    if m:
+        return int(m.group(1))
+    return -1
+
+
+def _refill_origine_from_book_crate(bbcrate, origine, cycle_type):
+    """
+    Scans BodBookCrate for a BodBook matching the current cycle type with > 50 BODs.
+    Extracts 1 BodBook
+    """
+    bod_book_crate = bbcrate
+    if not bod_book_crate:
+        return 0
+    UseObject(bod_book_crate)
+    Wait(400)
+    MoveItem(origine, 1, bbcrate, 0, 0, 0)
+    Wait(600)
+    book_keyword = "tailor" if cycle_type == "Tailor" else "black"
+
+    FindType(BOD_BOOK_TYPE, bod_book_crate)
+    all_books = list(GetFoundList())
+
+    source_book = 0
+    for book in all_books:
+        tooltip = GetTooltip(book).lower()
+        if book_keyword not in tooltip:
+            continue
+        count = _parse_book_count(tooltip)
+        if count > 50:
+            source_book = book
+            AddToSystemJournal(f"BODBookCrate: Found {cycle_type} book with {count} BODs — swapping.")
+            MoveItem(book, 1, Backpack(), 0, 0, 0)
+            Wait(600)
+            return source_book
+        Wait(50)
+
+    if not source_book:
+        AddToSystemJournal(f"BODBookCrate: No {cycle_type} book with >50 BODs found.")
+        BodCycler_AI_Debugger.send_error_alert("origine_empty", "Origine", f"no reserve {cycle_type} book in BODBookCrate", False)
+        return
+
+    return source_book 
+
+
+
+def extract_bod_from_origine(origine_serial, bbcrate=0, cycle_type="Tailor"):
     if GetType(origine_serial) != 0x2259:
         FindType(BOD_TYPE, origine_serial)
         if FindCount() > 0:
@@ -202,8 +254,10 @@ def extract_bod_from_origine(origine_serial):
     idx = wait_for_gump(BOOK_GUMP_ID, 5000)
     
     if idx == -1: 
-        AddToSystemJournal("Debug: Failed to open Origine book gump.")
-        return 0
+        # AddToSystemJournal("Debug: Failed to open Origine book gump.")
+        # Auto-replenish Origine from BODBookCrate if low
+        new_serial = _refill_origine_from_book_crate(bbcrate, origine_serial, cycle_type)
+        return (0, new_serial)
     
     NumGumpButton(idx, 5) # Drop first BOD
     Wait(2000)
@@ -651,15 +705,16 @@ def run_crafting_cycle():
     scartare = config['books']['Scartare']
     riprova = config['books']['Riprova']
     crate = config['containers']['MaterialCrate']
-    
-    try: 
+    bbcrate = config.get('containers', {}).get('BodBookCrate', 0)
+    cycle_type = config.get("cycle_type", "Tailor")
+
+    try:
         target_trades = int(config.get("trade", {}).get("target_trades", BODS_TO_PROCESS))
     except ValueError: 
         target_trades = BODS_TO_PROCESS
         
     session_crafted = 0
     session_small = 0
-    session_large = 0
     
     AddToSystemJournal(f"=== Starting Crafting Cycle ({target_trades} BODs) ===")
     
@@ -667,31 +722,20 @@ def run_crafting_cycle():
         UseObject(crate)
         Wait(1000)
 
-    # Auto-replenish Origine from BODCrate if low
-    bod_crate = config.get("containers", {}).get("BODCrate", 0)
-    if bod_crate != 0:
-        FindType(BOD_TYPE, origine)
-        origine_count = FindCount()
-        needed = target_trades - origine_count
-        if needed > 0:
-            AddToSystemJournal(f"Origine low ({origine_count}/{target_trades}). Attempting to refill from BODCrate...")
-            FindTypeEx(BOD_TYPE, 0x0483, bod_crate)  # Tailor BOD color = 0x0483
-            available = GetFoundList()[:needed]
-            moved = 0
-            for extra_bod in available:
-                if check_abort():
-                    break
-                MoveItem(extra_bod, 1, origine, 0, 0, 0)
-                Wait(800)
-                moved += 1
-            if moved > 0:
-                AddToSystemJournal(f"Origine refilled: pulled {moved} BODs from BODCrate.")
-                BodCycler_AI_Debugger.send_error_alert("origine_refill", f"{moved} BODs", f"was {origine_count}/{target_trades}", True)
+
+    try:
+        import BodCycler_TakeBods as _tb
+    except Exception:
+        _tb = None
 
     for i in range(target_trades):
-        if check_abort(): 
+        if check_abort():
             break
-            
+
+        if _tb and _tb.should_collect_bods():
+            AddToSystemJournal("BOD collection window opened mid-cycle — stopping early for collectors.")
+            break
+
         close_all_gumps()
         consolidate_materials(crate) 
         
@@ -700,19 +744,25 @@ def run_crafting_cycle():
             bod = FindItem()
             AddToSystemJournal(f"Found existing BOD in backpack: {hex(bod)}")
         else:
-            bod = extract_bod_from_origine(origine)
-            if bod == 0: 
+            result = extract_bod_from_origine(origine, bbcrate, cycle_type)
+            if isinstance(result, tuple):
+                bod, origine = result       # swap: bod=0, origine=new book serial
+                if origine == 0:
+                    break                   # no replacement book found
+                continue                    # retry with new Origine
+            elif result == 0:
                 break
+            else:
+                bod = result
             
         info = parse_bod(bod)
         
         if info['qty_needed'] <= 0:
             dest = conserva if (info['prize_id'] and info['prize_id'] > 0) else consegna
-            if dest == conserva:
-                if info['is_large']: 
-                    session_large += 1
-                else: 
-                    session_small += 1
+            if dest == conserva and not info['is_large']:
+                session_small += 1
+                BodCycler_Assembler.append_to_inventory({"type": "Small", "category": info['cat'], "item": info['item_name'], "material": info['material'].title(), "quality": "Exceptional" if info['is_except'] else "Normal", "amount": info['qty_total']})
+                AddToSystemJournal(f"[Conserva] {info['item_name']} {info['material']} x{info['qty_total']} → prize #{info['prize_id']}")
             MoveItem(bod, 0, dest, 0, 0, 0)
             Wait(1000)
             close_all_gumps()
@@ -721,16 +771,15 @@ def run_crafting_cycle():
         BONE_ITEM_NAMES = {"bone helmet", "bone gloves", "bone arms", "bone leggings", "bone armor"}
         if info['material'] == "bone" or info['is_large'] or info['item_name'] in BONE_ITEM_NAMES:
             dest = conserva if (info['prize_id'] and info['prize_id'] > 0) else scartare
-            if dest == conserva:
-                if info['is_large']: 
-                    session_large += 1
-                else: 
-                    session_small += 1
+            if dest == conserva and not info['is_large']:
+                session_small += 1
+                BodCycler_Assembler.append_to_inventory({"type": "Small", "category": info['cat'], "item": info['item_name'], "material": info['material'].title(), "quality": "Exceptional" if info['is_except'] else "Normal", "amount": info['qty_total']})
+                AddToSystemJournal(f"[Conserva] {info['item_name']} {info['material']} x{info['qty_total']} → prize #{info['prize_id']}")
             MoveItem(bod, 0, dest, 0, 0, 0)
             Wait(1000)
             close_all_gumps()
             continue
-            
+
         cat_identifier, item_identifier, item_id, tool_type, item_cost = get_craft_info(info['item_name'])
         
         if cat_identifier is None: 
@@ -782,11 +831,10 @@ def run_crafting_cycle():
         if is_full:
             session_crafted += 1
             dest = conserva if (info['prize_id'] and info['prize_id'] > 0) else consegna
-            if dest == conserva:
-                if info['is_large']:
-                    session_large += 1
-                else:
-                    session_small += 1
+            if dest == conserva and not info['is_large']:
+                session_small += 1
+                BodCycler_Assembler.append_to_inventory({"type": "Small", "category": info['cat'], "item": info['item_name'], "material": info['material'].title(), "quality": "Exceptional" if info['is_except'] else "Normal", "amount": info['qty_total']})
+                AddToSystemJournal(f"[Conserva] {info['item_name']} {info['material']} x{info['qty_total']} → prize #{info['prize_id']}")
         else:
             # BOD fill failed — retry once in case it was a gump lag/timing issue
             AddToSystemJournal(f"BOD fill failed for {info['item_name']} — retrying once...")
@@ -795,11 +843,10 @@ def run_crafting_cycle():
             if is_full:
                 session_crafted += 1
                 dest = conserva if (info['prize_id'] and info['prize_id'] > 0) else consegna
-                if dest == conserva:
-                    if info['is_large']:
-                        session_large += 1
-                    else:
-                        session_small += 1
+                if dest == conserva and not info['is_large']:
+                    session_small += 1
+                    BodCycler_Assembler.append_to_inventory({"type": "Small", "category": info['cat'], "item": info['item_name'], "material": info['material'].title(), "quality": "Exceptional" if info['is_except'] else "Normal", "amount": info['qty_total']})
+                    AddToSystemJournal(f"[Conserva] {info['item_name']} {info['material']} x{info['qty_total']} → prize #{info['prize_id']}")
                 BodCycler_AI_Debugger.send_error_alert("fill_retry_success", info['item_name'], info['material'], True)
             else:
                 # Retry also failed
@@ -810,7 +857,7 @@ def run_crafting_cycle():
         Wait(1000)
         close_all_gumps()
 
-    update_stats(session_crafted, session_small, session_large)
+    update_stats(session_crafted, session_small)
     AddToSystemJournal("=== Crafting Cycle Complete ===")
 
 
