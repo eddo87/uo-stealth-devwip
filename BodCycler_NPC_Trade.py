@@ -2,9 +2,6 @@ from stealth import *
 import json
 import os
 import time
-from datetime import datetime
-from bod_data import *
-
 import BodCycler_Crafting
 import BodCycler_AI_Debugger
 try:
@@ -35,15 +32,6 @@ SCISSORS = 0x0F9E
 OIL_CLOTH = 0x175D
 SANDALS = 0x170D
 BOOK_TYPE = 0x2259                 # BOD Book type ID
-
-CONFIG_FILE = f"{StealthPath()}Scripts\\{CharName()}_bodcycler_config.json"
-
-
-def load_config():
-    if os.path.exists(CONFIG_FILE):
-        with open(CONFIG_FILE, "r") as f:
-            return json.load(f)
-    return None
 
 def find_tailor():
     SetFindDistance(10) 
@@ -233,11 +221,11 @@ def buy_and_cut_cloth(npc, amount=80):
     move_to_npc(npc)
     
     try: ClearAutoBuy()
-    except: pass
+    except Exception: pass
     try: ClearBuyList()
-    except: pass
+    except Exception: pass
     try: ClearBuy()
-    except: pass
+    except Exception: pass
 
     bought_any = False
     for bolt_id in BOLT_OF_CLOTH_IDS:
@@ -245,7 +233,7 @@ def buy_and_cut_cloth(npc, amount=80):
         if bought_any: break
             
         try: AutoBuy(bolt_id, 0xFFFF, amount)
-        except: return
+        except Exception: return
             
         world_save_guard()
         SetContextMenuHook(npc, CTX_BUY)
@@ -257,7 +245,7 @@ def buy_and_cut_cloth(npc, amount=80):
         try: 
             AutoBuy(bolt_id, 0xFFFF, 0)
             ClearAutoBuy()
-        except: pass
+        except Exception: pass
             
         FindType(bolt_id, Backpack())
         if FindCount() > 0: bought_any = True

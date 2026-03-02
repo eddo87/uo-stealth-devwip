@@ -1,9 +1,9 @@
 from stealth import *
 import os
 import json
+import copy
 import threading
 import time
-import importlib
 import BodCycler_AI_Debugger
 from tkinter import *
 from datetime import datetime
@@ -12,28 +12,33 @@ from BodCycler_Utils import set_status, read_stats, write_stats
 # Import the logic modules
 try:
     import BodCycler_CheckSupplies
-except ImportError:
-    pass
+except ImportError as e:
+    AddToSystemJournal(f"[WARN] Failed to import BodCycler_CheckSupplies: {e}")
 
 try:
     import BodCycler_Crafting
-except ImportError:
-    pass
+except ImportError as e:
+    AddToSystemJournal(f"[WARN] Failed to import BodCycler_Crafting: {e}")
 
 try:
     import BodCycler_NPC_Trade
-except ImportError:
-    pass
+except ImportError as e:
+    AddToSystemJournal(f"[WARN] Failed to import BodCycler_NPC_Trade: {e}")
 
 try:
     import BodCycler_Scanner
-except ImportError:
-    pass
+except ImportError as e:
+    AddToSystemJournal(f"[WARN] Failed to import BodCycler_Scanner: {e}")
 
 try:
     import BodCycler_Assembler
-except ImportError:
-    pass
+except ImportError as e:
+    AddToSystemJournal(f"[WARN] Failed to import BodCycler_Assembler: {e}")
+
+try:
+    import BodCycler_TakeBods
+except ImportError as e:
+    AddToSystemJournal(f"[WARN] Failed to import BodCycler_TakeBods: {e}")
 
 
 
@@ -42,11 +47,13 @@ CONFIG_FILE = f"{StealthPath()}Scripts\\{CharName()}_bodcycler_config.json"
 SUPPLY_FILE = f"{StealthPath()}Scripts\\{CharName()}_bodcycler_supplies.json"
 STATS_FILE = f"{StealthPath()}Scripts\\{CharName()}_bodcycler_stats.json"
 INVENTORY_FILE = f"{StealthPath()}Scripts\\{CharName()}_bodcycler_inventory.json"
+ICON_FILE = f"{StealthPath()}Scripts\\bod_cycler.ico"
 
 STATS = {
     "start_time": None,
     "status": "Idle"
 }
+_STATS_LOCK = threading.Lock()
 
 DEFAULT_CONFIG = {
     "cycle_type": "Tailor", 
@@ -74,7 +81,7 @@ DEFAULT_CONFIG = {
 class BodCyclerGUI(threading.Thread):
     def __init__(self):
         super(BodCyclerGUI, self).__init__(daemon=True)
-        self.config = DEFAULT_CONFIG.copy()
+        self.config = copy.deepcopy(DEFAULT_CONFIG)
         self.root = None
         self.vars = {} 
         self.running = True
@@ -103,7 +110,7 @@ class BodCyclerGUI(threading.Thread):
             if name.startswith("rune_"):
                 key = name.replace("rune_", "")
                 try: self.config["travel"]["Runes"][key] = int(var.get())
-                except: pass
+                except ValueError: pass
         if "travel_method" in self.vars:
             self.config["travel"]["Method"] = self.vars["travel_method"].get()
         if "cycle_type" in self.vars:
@@ -111,10 +118,10 @@ class BodCyclerGUI(threading.Thread):
             
         if "target_trades" in self.vars:
             try: self.config["trade"]["target_trades"] = int(self.vars["target_trades"].get())
-            except: pass
+            except ValueError: pass
         if "buy_cloth_amount" in self.vars:
             try: self.config["trade"]["buy_cloth_amount"] = int(self.vars["buy_cloth_amount"].get())
-            except: pass
+            except ValueError: pass
         if "buy_cloth_enabled" in self.vars:
             self.config["trade"]["buy_cloth_enabled"] = bool(self.vars["buy_cloth_enabled"].get())
 
@@ -155,54 +162,29 @@ class BodCyclerGUI(threading.Thread):
 
     # --- Single Trigger Methods (Manual Testing) ---
     def trigger_supply_check(self):
-        self.save_config() 
+        self.save_config()
         ClientPrintEx(Self(), 1, 1, "Starting Supply Check...")
-        try:
-            import BodCycler_CheckSupplies
-            importlib.reload(BodCycler_CheckSupplies) 
-            threading.Thread(target=BodCycler_CheckSupplies.check_supplies, daemon=True).start()
-        except Exception as e:
-            AddToSystemJournal(f"Failed to load BodCycler_CheckSupplies: {e}")
-            
+        threading.Thread(target=BodCycler_CheckSupplies.check_supplies, daemon=True).start()
+
     def trigger_crafting(self):
         self.save_config()
         ClientPrintEx(Self(), 1, 1, "Starting Crafting Engine...")
-        try:
-            import BodCycler_Crafting
-            importlib.reload(BodCycler_Crafting) 
-            threading.Thread(target=BodCycler_Crafting.run_crafting_cycle, daemon=True).start()
-        except Exception as e:
-            AddToSystemJournal(f"Failed to load BodCycler_Crafting: {e}")
+        threading.Thread(target=BodCycler_Crafting.run_crafting_cycle, daemon=True).start()
 
     def trigger_trade(self):
         self.save_config()
         ClientPrintEx(Self(), 1, 1, "Starting NPC Trade Loop...")
-        try:
-            import BodCycler_NPC_Trade
-            importlib.reload(BodCycler_NPC_Trade) 
-            threading.Thread(target=BodCycler_NPC_Trade.execute_trade_loop, daemon=True).start()
-        except Exception as e:
-            AddToSystemJournal(f"Failed to load BodCycler_NPC_Trade: {e}")
+        threading.Thread(target=BodCycler_NPC_Trade.execute_trade_loop, daemon=True).start()
 
     def trigger_scan(self):
         self.save_config()
         ClientPrintEx(Self(), 1, 1, "Scanning Conserva Book...")
-        try:
-            import BodCycler_Scanner
-            importlib.reload(BodCycler_Scanner) 
-            threading.Thread(target=BodCycler_Scanner.run_scanner, daemon=True).start()
-        except Exception as e:
-            AddToSystemJournal(f"Failed to load BodCycler_Scanner: {e}")
+        threading.Thread(target=BodCycler_Scanner.run_scanner, daemon=True).start()
 
     def trigger_assemble(self):
         self.save_config()
         ClientPrintEx(Self(), 1, 1, "Assembling Large BODs...")
-        try:
-            import BodCycler_Assembler
-            importlib.reload(BodCycler_Assembler) 
-            threading.Thread(target=BodCycler_Assembler.run_assembler, daemon=True).start()
-        except Exception as e:
-            AddToSystemJournal(f"Failed to load BodCycler_Assembler: {e}")
+        threading.Thread(target=BodCycler_Assembler.run_assembler, daemon=True).start()
 
     # --- Navigation Helpers ---
     def test_travel(self, rune_key_name):
@@ -212,7 +194,7 @@ class BodCyclerGUI(threading.Thread):
         rb_serial = self.config["travel"].get("RuneBook", 0)
         if rb_serial == 0: return
         try: rune_idx = int(self.vars[f"rune_{rune_key_name}"].get())
-        except: return
+        except ValueError: return
         
         method = self.vars["travel_method"].get()
         offset = 5 if method == "Recall" else 7
@@ -279,31 +261,53 @@ class BodCyclerGUI(threading.Thread):
         if not self.root: return
         self.read_supplies_file()
         self.read_stats_file()
-        
-        if STATS["start_time"]:
-            elapsed = datetime.now() - STATS["start_time"]
+
+        with _STATS_LOCK:
+            start_time = STATS["start_time"]
+            current_status = STATS["status"]
+
+        if start_time:
+            elapsed = datetime.now() - start_time
             self.vars["timer"].set(f"Time: {str(elapsed).split('.')[0]}")
-        else: self.vars["timer"].set("Time: 00:00:00")
-        
-        self.vars["status"].set(f"Status: {STATS['status']}")
+        else:
+            self.vars["timer"].set("Time: 00:00:00")
+
+        self.vars["status"].set(f"Status: {current_status}")
         if self.running: self.root.after(1000, self.update_timer)
 
     # --- ORCHESTRATION: The Master Loop ---
 
     def set_global_status(self, status_text):
         """Updates the GUI and writes status to the stats file for worker scripts to read."""
-        STATS["status"] = status_text
-        self.vars["status"].set(f"Status: {status_text}")
+        with _STATS_LOCK:
+            STATS["status"] = status_text
+        if self.root:
+            self.root.after(0, lambda: self.vars["status"].set(f"Status: {status_text}"))
         set_status(status_text)
+
+    def _is_stopped(self):
+        with _STATS_LOCK:
+            return STATS["status"] == "Stopped"
 
     def master_cycle_thread(self):
         AddToSystemJournal("=== MASTER CYCLE INITIATED ===")
-        while STATS["status"] != "Stopped":
+        while not self._is_stopped():
             try:
-                # BOD COLLECTION EVENT CHECK (≥60 min since last collection)
+                # STEP 1: Craft Items & Fill BODs
+                if self._is_stopped(): break
+                self.set_global_status("Running (Crafting)")
+                ClientPrintEx(Self(), 1, 1, "Master: Filling BODs...")
+                BodCycler_Crafting.run_crafting_cycle()
+
+                # STEP 2: Check Supplies & Maintain Tools
+                if self._is_stopped(): break
+                self.set_global_status("Running (Supplies)")
+                ClientPrintEx(Self(), 1, 1, "Master: Checking Supplies...")
+                BodCycler_CheckSupplies.check_supplies()
+
+                # STEP 2.2: BOD Collection (if window is open)
+                if self._is_stopped(): break
                 try:
-                    import BodCycler_TakeBods
-                    importlib.reload(BodCycler_TakeBods)
                     if BodCycler_TakeBods.should_collect_bods():
                         self.set_global_status("Running (BOD Collection)")
                         AddToSystemJournal("BOD collection due! Pausing ed4 → walking to standby (892, 537)...")
@@ -311,35 +315,14 @@ class BodCyclerGUI(threading.Thread):
                         time.sleep(2)
                         Disconnect()
                         BodCycler_TakeBods.run_take_bods_cycle()
-                        # run_take_bods_cycle() returns as soon as ed4 reconnects — continue immediately
                         AddToSystemJournal("BOD Collection complete. Resuming crafting cycle.")
                 except Exception as _te:
                     AddToSystemJournal(f"TakeBods check skipped: {_te}")
 
-                # STEP 1: Craft Items & Fill BODs
-                if STATS["status"] == "Stopped": break
-                self.set_global_status("Running (Crafting)")
-                ClientPrintEx(Self(), 1, 1, "Master: Filling BODs...")
-                import BodCycler_Crafting
-                importlib.reload(BodCycler_Crafting)
-                BodCycler_Crafting.run_crafting_cycle()
-
-                # STEP 2: Check Supplies & Maintain Tools
-                if STATS["status"] == "Stopped": break
-                self.set_global_status("Running (Supplies)")
-                ClientPrintEx(Self(), 1, 1, "Master: Checking Supplies...")
-                import BodCycler_CheckSupplies
-                importlib.reload(BodCycler_CheckSupplies)
-                BodCycler_CheckSupplies.check_supplies()
-
                 # STEP 2.5: Assembly Check
-                if STATS["status"] == "Stopped":
-                    return
+                if self._is_stopped(): break
 
                 try:
-                    import BodCycler_Assembler
-                    importlib.reload(BodCycler_Assembler)
-
                     if os.path.exists(INVENTORY_FILE):
                         self.set_global_status("Running (Assembly Check)")
                         ClientPrintEx(Self(), 1, 1, "Master: Checking local inventory for sets...")
@@ -353,55 +336,46 @@ class BodCyclerGUI(threading.Thread):
                             AddToSystemJournal(f"Assembly: {len(_sets)} set(s) ready in JSON. Running Assembler...")
                             self.set_global_status("Running (Assembling)")
                             BodCycler_Assembler.run_assembler()
-                            # Assembler may have moved or skipped BODs — re-scan to rebuild inventory
                             AddToSystemJournal("Assembly: Re-scanning to update inventory after assembly attempt...")
-                            import BodCycler_Scanner
-                            importlib.reload(BodCycler_Scanner)
                             BodCycler_Scanner.run_scanner()
                         else:
                             AddToSystemJournal("Assembly: No complete sets found in local records.")
                     else:
-                        # No inventory file — scan once to build it
                         AddToSystemJournal("Assembly: Inventory file missing. Running one-time scan...")
-                        import BodCycler_Scanner
-                        importlib.reload(BodCycler_Scanner)
                         BodCycler_Scanner.run_scanner()
 
                 except Exception as _e:
                     AddToSystemJournal(f"Assembly step failed: {_e}")
 
                 # STEP 3: Travel, Trade, & Return
-                if STATS["status"] == "Stopped": break
+                if self._is_stopped(): break
                 self.set_global_status("Running (Trading)")
                 ClientPrintEx(Self(), 1, 1, "Master: Commencing NPC Trade...")
-                import BodCycler_NPC_Trade
-                importlib.reload(BodCycler_NPC_Trade)
                 BodCycler_NPC_Trade.execute_trade_loop()
-            
-                
+
                 # LOOP PAUSE
-                if STATS["status"] == "Stopped": break
+                if self._is_stopped(): break
                 self.set_global_status("Running (Cooldown)")
                 AddToSystemJournal("Cycle complete. Fumando una sigaretta...")
-                
-                # Sleep in increments so we can interrupt it instantly if Stop is pressed
+
                 for _ in range(3):
-                    if STATS["status"] == "Stopped": break
+                    if self._is_stopped(): break
                     time.sleep(1)
-                
+
             except Exception as e:
                 AddToSystemJournal(f"CRITICAL ERROR in Master Cycle: {e}")
                 self.set_global_status("Error (See Journal)")
-                break
-                
+                # Continue the loop rather than permanently breaking on transient errors
+
         AddToSystemJournal("=== MASTER CYCLE STOPPED ===")
 
     def start_cycling(self):
-        if STATS["status"] != "Idle" and STATS["status"] != "Stopped" and "Running" in STATS["status"]:
-            AddToSystemJournal("Cycle is already running!")
-            return
+        with _STATS_LOCK:
+            if "Running" in STATS["status"]:
+                AddToSystemJournal("Cycle is already running!")
+                return
+            STATS["start_time"] = datetime.now()
 
-        STATS["start_time"] = datetime.now()
         self.set_global_status("Running")
         self.save_config()
         self.reset_stats()
@@ -410,7 +384,8 @@ class BodCyclerGUI(threading.Thread):
         threading.Thread(target=self.master_cycle_thread, daemon=True).start()
 
     def stop_cycling(self):
-        STATS["start_time"] = None
+        with _STATS_LOCK:
+            STATS["start_time"] = None
         # Writing 'Stopped' to the file will trigger the check_abort() breaks in the worker scripts
         self.set_global_status("Stopped")
         ClientPrintEx(Self(), 1, 1, "Cycle Stopped")
@@ -609,8 +584,6 @@ class BodCyclerGUI(threading.Thread):
             return
 
         try:
-            import BodCycler_Assembler
-            importlib.reload(BodCycler_Assembler)
             sets = BodCycler_Assembler.find_completable_sets(inventory)
         except Exception as e:
             AddToSystemJournal(f"Assembly Check: Error running find_completable_sets — {e}")

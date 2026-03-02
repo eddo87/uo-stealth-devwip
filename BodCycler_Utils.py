@@ -5,11 +5,15 @@ from stealth import *
 import json
 import os
 import time
+import threading
+
+_STATS_LOCK = threading.Lock()
+_INV_LOCK   = threading.Lock()
 
 try:
     from checkWorldSave import world_save_guard
 except ImportError:
-    def world_save_guard(): pass
+    def world_save_guard(): return False
 
 # ---------------------------------------------------------------------------
 # Shared File Paths
@@ -52,7 +56,7 @@ def check_abort():
         try:
             with open(STATS_FILE, "r") as f:
                 return json.load(f).get("status") == "Stopped"
-        except:
+        except Exception:
             pass
     return False
 
@@ -66,25 +70,29 @@ def read_stats():
         "crafted": 0, "prized_small": 0, "prized_large": 0,
         "prizes_dropped": 0, "recovery_success": 0, "mats_used": {}, "status": "Idle"
     }
-    if os.path.exists(STATS_FILE):
-        for _ in range(5):          # retry loop for write-lock races
-            try:
-                with open(STATS_FILE, "r") as f:
-                    content = f.read()
-                if content.strip():
-                    defaults.update(json.loads(content))
-                break
-            except Exception:
-                time.sleep(0.2)
+    with _STATS_LOCK:
+        if os.path.exists(STATS_FILE):
+            for _ in range(3):
+                try:
+                    with open(STATS_FILE, "r") as f:
+                        content = f.read()
+                    if content.strip():
+                        defaults.update(json.loads(content))
+                    break
+                except Exception:
+                    time.sleep(0.1)
     return defaults
 
 def write_stats(data):
-    """Writes a stats dict to the stats file safely."""
-    try:
-        with open(STATS_FILE, "w") as f:
-            json.dump(data, f, indent=4)
-    except Exception as e:
-        AddToSystemJournal(f"Utils: Failed to write stats — {e}")
+    """Writes a stats dict to the stats file atomically."""
+    tmp = STATS_FILE + ".tmp"
+    with _STATS_LOCK:
+        try:
+            with open(tmp, "w") as f:
+                json.dump(data, f, indent=4)
+            os.replace(tmp, STATS_FILE)
+        except Exception as e:
+            AddToSystemJournal(f"Utils: Failed to write stats — {e}")
 
 def set_status(status_text):
     """

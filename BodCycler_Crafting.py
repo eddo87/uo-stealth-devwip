@@ -4,7 +4,6 @@ import os
 import sys
 import time
 import re
-from datetime import datetime
 
 # Force Python to look in the current script's directory for custom modules
 script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -21,41 +20,20 @@ import BodCycler_Assembler
 try:
     from checkWorldSave import world_save_guard
 except ImportError:
-    def world_save_guard(): 
+    def world_save_guard():
         return False
+
+from BodCycler_Utils import (
+    CONFIG_FILE, STATS_FILE, BOD_TYPE, BOD_BOOK_TYPE, BOOK_GUMP_ID,
+    load_config, check_abort, close_all_gumps, wait_for_gump
+)
 
 # --- Config ---
 # Fallback count if Config file is unreadable
 BODS_TO_PROCESS = 5
 
 # --- Constants ---
-BOD_TYPE = 0x2258
-BOD_BOOK_TYPE = 0x2259
-BOOK_GUMP_ID = 0x54F555DF
 CRAFT_GUMP_ID = 0x38920abd
-
-CONFIG_FILE = f"{StealthPath()}Scripts\\{CharName()}_bodcycler_config.json"
-STATS_FILE = f"{StealthPath()}Scripts\\{CharName()}_bodcycler_stats.json"
-
-
-def load_config():
-    if os.path.exists(CONFIG_FILE):
-        with open(CONFIG_FILE, "r") as f:
-            return json.load(f)
-    return None
-
-
-def check_abort():
-    """Checks the stats file to see if the GUI requested a hard stop."""
-    if os.path.exists(STATS_FILE):
-        try:
-            with open(STATS_FILE, "r") as f:
-                data = json.load(f)
-                if data.get("status") == "Stopped":
-                    return True
-        except:
-            pass
-    return False
 
 
 def update_stats(crafted=0, prized_small=0, prized_large=0):
@@ -80,15 +58,6 @@ def update_stats(crafted=0, prized_small=0, prized_large=0):
         AddToSystemJournal(f"Failed to save stats: {e}")
 
 
-def close_all_gumps():
-    """Closes all open gumps to ensure a clean UI state."""
-    count = GetGumpsCount()
-    if count > 0:
-        for i in reversed(range(count)):
-            CloseSimpleGump(i)
-        Wait(500)
-
-
 def consolidate_materials(crate_serial):
     """Scans the backpack for loose cloth, leather, bone, and iron and moves it to the resource crate."""
     if crate_serial == 0: 
@@ -107,17 +76,6 @@ def consolidate_materials(crate_serial):
             world_save_guard()
             MoveItem(item, 0, crate_serial, 0, 0, 0)
             Wait(800)
-
-
-def wait_for_gump(gump_id, timeout_ms=3000):
-    t = datetime.now()
-    while (datetime.now() - t).total_seconds() * 1000 < timeout_ms:
-        world_save_guard()
-        for i in range(GetGumpsCount()):
-            if GetGumpID(i) == gump_id: 
-                return i
-        Wait(50)
-    return -1
 
 
 def find_button_for_text(gump_data, text_to_find):
@@ -229,9 +187,9 @@ def _refill_origine_from_book_crate(bbcrate, origine, cycle_type):
     if not source_book:
         AddToSystemJournal(f"BODBookCrate: No {cycle_type} book with >50 BODs found.")
         BodCycler_AI_Debugger.send_error_alert("origine_empty", "Origine", f"no reserve {cycle_type} book in BODBookCrate", False)
-        return
+        return 0
 
-    return source_book 
+    return source_book
 
 
 
@@ -454,10 +412,13 @@ def check_and_pull_materials(material, qty_to_craft, item_cost, crate_serial):
             MoveItem(stack, pull_amt, Backpack(), 0, 0, 0)
             Wait(1200)
             
-    FindTypeEx(t, mat_color, Backpack(), False)
-    if FindFullQuantity() >= required_units: 
+    total_bp = 0
+    for t in mat_types:
+        FindTypeEx(t, mat_color, Backpack(), False)
+        total_bp += FindFullQuantity()
+    if total_bp >= required_units:
         return True
-            
+
     AddToSystemJournal(f"CRITICAL: Out of {material} in Crate!")
     return False
 
@@ -598,12 +559,10 @@ def craft_items_until_done(bod_serial, tool_type, cat_identifier, item_identifie
                 else:
                     AddToSystemJournal("Item REJECTED by BOD. Tripping Circuit Breaker.")
                     try:
-                        import BodCycler_AI_Debugger
-                        # Uses original item_name so the Debugger logic doesn't break on Integers
                         BodCycler_AI_Debugger.report_mismatch(item_name, current_target_id, actual_graphic, str(cat_identifier))
-                    except: 
-                        pass
-                    return False 
+                    except Exception as _e:
+                        AddToSystemJournal(f"report_mismatch failed: {_e}")
+                    return False
             else:
                 make_last_ready = True
         

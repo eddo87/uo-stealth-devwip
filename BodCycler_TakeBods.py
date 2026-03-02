@@ -76,9 +76,9 @@ def _get_bod(npc_serial: int) -> bool:
         newMoveXY(GetX(npc_serial), GetY(npc_serial), False, 2, True)
         Wait(MIN_PAUSE)
 
+    SetContextMenuHook(npc_serial, CONTEXT_MENU_ENTRY)
     RequestContextMenu(npc_serial)
     Wait(MED_PAUSE)
-    SetContextMenuHook(npc_serial, CONTEXT_MENU_ENTRY)
 
     # Event-driven: poll for gump up to GUMP_TIMEOUT, then skip NPC
     idx = wait_for_gump(BOD_GUMP_ID, GUMP_TIMEOUT)

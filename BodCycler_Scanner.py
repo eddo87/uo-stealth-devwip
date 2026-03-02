@@ -3,7 +3,7 @@ import re
 import json
 import os
 import time
-from bod_data import *
+from bod_data import categorize_items, normalize_material, LARGE_COMPONENTS
 
 try:
     from checkWorldSave import world_save_guard
@@ -28,7 +28,7 @@ def get_all_elements(g):
                 text = re.sub(r'<[^>]+>', '', raw).strip()
                 if text:
                     elements.append({'x': entry.get('X', 0), 'y': entry.get('Y', 0), 'text': text})
-            except: pass
+            except Exception: pass
     if 'GumpText' in g and 'Text' in g:
         for entry in g['GumpText']:
             try:
@@ -37,7 +37,7 @@ def get_all_elements(g):
                     text = str(g['Text'][text_id]).strip()
                     if text:
                         elements.append({'x': entry.get('X', 0), 'y': entry.get('Y', 0), 'text': text})
-            except: pass
+            except Exception: pass
     return elements
 
 def infer_material(item_name, current_mat):
@@ -105,7 +105,7 @@ def parse_page_visually(g):
         qty = 0
         if "/" in b_amt:
             try: qty = int(b_amt.split('/')[1].strip())
-            except: pass
+            except Exception: pass
         elif b_amt.isdigit():
             qty = int(b_amt)
 

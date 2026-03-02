@@ -71,7 +71,7 @@ def log_failure(item_name, reason, material):
         try:
             with open(LEARNING_DB, "r") as f:
                 db = json.load(f)
-        except: pass
+        except Exception: pass
     
     entry = db.get(item_name, {"failures": 0, "reasons": [], "last_material": material})
     entry["failures"] += 1
@@ -94,7 +94,7 @@ def should_trash(item_name):
         entry = db.get(item_name)
         if entry and entry["failures"] >= 3:
             return True
-    except: pass
+    except Exception: pass
     return False
 
 def evaluate_riprova_queue(riprova_list):
@@ -104,7 +104,7 @@ def evaluate_riprova_queue(riprova_list):
     try:
         with open(SUPPLY_FILE, "r") as f:
             supplies = json.load(f).get("resources", {})
-    except:
+    except Exception:
         supplies = {}
         
     retry_list = []
@@ -132,6 +132,12 @@ def send_prize_notification(prize_name: str):
         requests.post(DISCORD_WEBHOOK, json=payload, timeout=10)
     except Exception as e:
         print(f"Discord prize notification failed: {e}")
+
+
+def report_mismatch(item_name, expected_id, actual_id, category):
+    """Reports a graphic ID mismatch to Discord when a crafted item is rejected by a BOD."""
+    detail = f"expected graphic 0x{expected_id:04X}, got 0x{actual_id:04X}, category '{category}'"
+    send_error_alert("graphic_mismatch", item_name, detail, True)
 
 
 def send_error_alert(event_type, bod_name, detail, had_resources):

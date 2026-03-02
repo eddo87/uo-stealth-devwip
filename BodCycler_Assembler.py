@@ -2,19 +2,20 @@ from stealth import *
 import json
 import os
 import time
-from bod_data import *
+from bod_data import LARGE_COMPONENTS
 
 try:
     from checkWorldSave import world_save_guard
 except ImportError:
-    def world_save_guard(): pass
+    def world_save_guard(): return False
 
 from BodCycler_Utils import (
     CONFIG_FILE, STATS_FILE, INVENTORY_FILE, SUPPLY_FILE,
     BOD_TYPE, BOD_BOOK_TYPE, BOOK_GUMP_ID, NEXT_PAGE_BTN,
     load_config, check_abort, close_all_gumps,
     wait_for_gump, wait_for_gump_serial_change,
-    read_stats, write_stats, set_status
+    read_stats, write_stats, set_status,
+    _INV_LOCK
 )
 
 COMBINE_BTN = 2
@@ -24,39 +25,41 @@ def append_to_inventory(bod_obj):
     Appends a new BOD to the inventory JSON, tracking its exact server array position.
     This can be called natively by the Crafting script when it deposits a prized Small BOD.
     """
-    if not os.path.exists(INVENTORY_FILE):
-        AddToSystemJournal("State Management: Inventory JSON not found. Run a manual Conserva Scan first!")
-        return
-        
-    try:
-        with open(INVENTORY_FILE, "r") as f:
-            inventory = json.load(f)
-    except Exception as e:
-        AddToSystemJournal(f"State Management Error reading inventory: {e}")
-        return
-        
-    # Find the current highest position in the book
-    max_pos = -1
-    for b in inventory:
-        if b.get('pos', -1) > max_pos:
-            max_pos = b['pos']
-            
-    # Calculate the exact Drop Button ID and Page based on the new appended position
-    bod_obj['pos'] = max_pos + 1
-    bod_obj['drop_btn'] = 5 + (bod_obj['pos'] * 2)
-    bod_obj['page'] = (bod_obj['pos'] // 10) + 1 
-    
-    inventory.append(bod_obj)
-    
-    try:
-        with open(INVENTORY_FILE, "w") as f:
-            json.dump(inventory, f, indent=4)
-            
-        item_name = bod_obj.get('item', bod_obj.get('category', 'BOD')).title()
-        mat_name = bod_obj.get('material', '')
-        AddToSystemJournal(f"State Management: Added {mat_name} {item_name} to Pos #{bod_obj['pos']}")
-    except:
-        AddToSystemJournal("State Management Error: Failed to write to JSON.")
+    with _INV_LOCK:
+        if not os.path.exists(INVENTORY_FILE):
+            AddToSystemJournal("State Management: Inventory JSON not found. Run a manual Conserva Scan first!")
+            return
+
+        try:
+            with open(INVENTORY_FILE, "r") as f:
+                inventory = json.load(f)
+        except Exception as e:
+            AddToSystemJournal(f"State Management Error reading inventory: {e}")
+            return
+
+        # Find the current highest position in the book
+        max_pos = -1
+        for b in inventory:
+            if b.get('pos', -1) > max_pos:
+                max_pos = b['pos']
+
+        # Calculate the exact Drop Button ID and Page based on the new appended position
+        bod_obj['pos'] = max_pos + 1
+        bod_obj['drop_btn'] = 5 + (bod_obj['pos'] * 2)
+        bod_obj['page'] = (bod_obj['pos'] // 10) + 1
+
+        inventory.append(bod_obj)
+
+        tmp = INVENTORY_FILE + ".tmp"
+        try:
+            with open(tmp, "w") as f:
+                json.dump(inventory, f, indent=4)
+            os.replace(tmp, INVENTORY_FILE)
+            item_name = bod_obj.get('item', bod_obj.get('category', 'BOD')).title()
+            mat_name = bod_obj.get('material', '')
+            AddToSystemJournal(f"State Management: Added {mat_name} {item_name} to Pos #{bod_obj['pos']}")
+        except Exception as e:
+            AddToSystemJournal(f"State Management Error: Failed to write to JSON — {e}")
 
 def find_completable_sets(inventory):
     smalls = [b for b in inventory if b['type'] == 'Small']
@@ -257,7 +260,7 @@ def run_assembler():
     with open(INVENTORY_FILE, "r") as f:
         try:
             inventory = json.load(f)
-        except:
+        except Exception:
             AddToSystemJournal("Assembler Error: Could not parse Inventory JSON.")
             return 0
         
