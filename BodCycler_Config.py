@@ -271,6 +271,7 @@ class BodCyclerGUI(threading.Thread):
         data["mats_used"] = {}
         data["recovery_success"] = 0
         data["session_start"] = time.time()
+        data["last_collection_time"] = time.time()   # prevent immediate collection on cycle start
         write_stats(data)
         self.read_stats_file()
 
@@ -299,79 +300,73 @@ class BodCyclerGUI(threading.Thread):
         AddToSystemJournal("=== MASTER CYCLE INITIATED ===")
         while STATS["status"] != "Stopped":
             try:
-                # BOD COLLECTION WINDOW CHECK (runs at :59 to :05 each hour)
+                # BOD COLLECTION EVENT CHECK (≥60 min since last collection)
                 try:
                     import BodCycler_TakeBods
                     importlib.reload(BodCycler_TakeBods)
                     if BodCycler_TakeBods.should_collect_bods():
                         self.set_global_status("Running (BOD Collection)")
-                        AddToSystemJournal("BOD Collection window! Handing off to collectors [ed2][ed3][ed5]...")
-                        home = self.config.get("home", {})
-                        hx, hy = home.get("X", 0), home.get("Y", 0)
-                        if hx and hy:
-                            AddToSystemJournal(f"Walking ed4 home ({hx},{hy}) before handoff...")
-                            newMoveXY(hx, hy, False, 1, True)
-                            time.sleep(2)
+                        AddToSystemJournal("BOD collection due! Pausing ed4 → walking to standby (892, 537)...")
+                        newMoveXY(892, 537, False, 1, True)
+                        time.sleep(2)
                         Disconnect()
                         BodCycler_TakeBods.run_take_bods_cycle()
-                        while BodCycler_TakeBods.should_collect_bods():
-                            if STATS["status"] == "Stopped": return
-                            time.sleep(10)
+                        # run_take_bods_cycle() returns as soon as ed4 reconnects — continue immediately
                         AddToSystemJournal("BOD Collection complete. Resuming crafting cycle.")
                 except Exception as _te:
                     AddToSystemJournal(f"TakeBods check skipped: {_te}")
 
-                # STEP 1: Check Supplies & Maintain Tools
-                if STATS["status"] == "Stopped": break
-                self.set_global_status("Running (Supplies)")
-                ClientPrintEx(Self(), 1, 1, "Master: Checking Supplies...")
-                import BodCycler_CheckSupplies
-                importlib.reload(BodCycler_CheckSupplies)
-                BodCycler_CheckSupplies.check_supplies()
-                
-                # STEP 2: Craft Items & Fill BODs
+                # STEP 1: Craft Items & Fill BODs
                 if STATS["status"] == "Stopped": break
                 self.set_global_status("Running (Crafting)")
                 ClientPrintEx(Self(), 1, 1, "Master: Filling BODs...")
                 import BodCycler_Crafting
                 importlib.reload(BodCycler_Crafting)
                 BodCycler_Crafting.run_crafting_cycle()
-                
-                # STEP 2.5: Optimized Assembly Check
-                # We skip the heavy Scanner.run_scanner() and rely on the live-updated inventory JSON.
-                if STATS["status"] == "Stopped": 
+
+                # STEP 2: Check Supplies & Maintain Tools
+                if STATS["status"] == "Stopped": break
+                self.set_global_status("Running (Supplies)")
+                ClientPrintEx(Self(), 1, 1, "Master: Checking Supplies...")
+                import BodCycler_CheckSupplies
+                importlib.reload(BodCycler_CheckSupplies)
+                BodCycler_CheckSupplies.check_supplies()
+
+                # STEP 2.5: Assembly Check
+                if STATS["status"] == "Stopped":
                     return
 
                 try:
                     import BodCycler_Assembler
                     importlib.reload(BodCycler_Assembler)
-                    
+
                     if os.path.exists(INVENTORY_FILE):
                         self.set_global_status("Running (Assembly Check)")
                         ClientPrintEx(Self(), 1, 1, "Master: Checking local inventory for sets...")
-                        
-                        # Load the existing inventory without re-scanning the world
+
                         with open(INVENTORY_FILE, "r") as _f:
                             _inv = json.load(_f)
-                            
-                        # find_completable_sets is light and fast
+
                         _sets = BodCycler_Assembler.find_completable_sets(_inv)
-                        
+
                         if _sets:
                             AddToSystemJournal(f"Assembly: {len(_sets)} set(s) ready in JSON. Running Assembler...")
                             self.set_global_status("Running (Assembling)")
-                            
-                            # The Assembler will still verify items exist before pulling them
                             BodCycler_Assembler.run_assembler()
+                            # Assembler may have moved or skipped BODs — re-scan to rebuild inventory
+                            AddToSystemJournal("Assembly: Re-scanning to update inventory after assembly attempt...")
+                            import BodCycler_Scanner
+                            importlib.reload(BodCycler_Scanner)
+                            BodCycler_Scanner.run_scanner()
                         else:
                             AddToSystemJournal("Assembly: No complete sets found in local records.")
                     else:
-                        # Fallback: If no inventory file exists, we MUST scan once to build it
+                        # No inventory file — scan once to build it
                         AddToSystemJournal("Assembly: Inventory file missing. Running one-time scan...")
                         import BodCycler_Scanner
                         importlib.reload(BodCycler_Scanner)
                         BodCycler_Scanner.run_scanner()
-                        
+
                 except Exception as _e:
                     AddToSystemJournal(f"Assembly step failed: {_e}")
 
@@ -400,7 +395,6 @@ class BodCyclerGUI(threading.Thread):
                 break
                 
         AddToSystemJournal("=== MASTER CYCLE STOPPED ===")
-        BodCycler_AI_Debugger.send_discord_session_report()
 
     def start_cycling(self):
         if STATS["status"] != "Idle" and STATS["status"] != "Stopped" and "Running" in STATS["status"]:

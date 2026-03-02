@@ -5,9 +5,19 @@
     "Architecture: BodCycler_Utils.py is the single source of truth for shared constants (BOD_TYPE, BOD_BOOK_TYPE, BOOK_GUMP_ID, NEXT_PAGE_BTN, CONFIG_FILE, STATS_FILE, INVENTORY_FILE, SUPPLY_FILE) and shared helpers (load_config, check_abort, close_all_gumps, wait_for_gump, wait_for_gump_serial_change, read_stats, write_stats, set_status). All other scripts import from it.",
     "Architecture: BodCycler_NPC_Trade.py has its own local constants block (not in Utils) for NPC-Trade-specific values: NPC_TYPES=[0x0190,0x0191], CTX_BUY=1, CTX_BOD=3, BTN_ACCEPT_BOD=1, BTN_DROP_BOD_1=5, BOD_GUMP_ID_SMALL=0x9bade6ea, BOD_GUMP_ID_LARGE=0xbe0dad1e, CLOTH_1=0x1766, CLOTH_2=0x1767, BOLT_OF_CLOTH_IDS=[0x0F95,0x0F97,0x0F9B,0x0F9C], SCISSORS=0x0F9E, OIL_CLOTH=0x175D, SANDALS=0x170D, BOOK_TYPE=0x2259.",
     "Architecture: BodCycler_NPC_Trade.py reads target_trades and buy_cloth_amount strictly from config (no hardcoded fallbacks) — if missing from config, the function logs an error and returns.",
+    "Architecture: Master Cycle order is Crafting → Supplies → Assembly → Trade. Crafting runs FIRST so that BODs are filled before restocking or trading. Supplies runs after to restock for the next round.",
     "Crafting Material Reset: craft_items_until_done must ALWAYS navigate to the Resources tab and set the material on the first item (make_last_ready=False), including mat_btn=6 (Normal). If skipped for Normal, the gump retains the previous BOD's colored material (e.g. Spined), causing Normal BODs to craft with the wrong material. Only 'Make Last' (make_last_ready=True) can safely skip resource navigation, since the material is baked into that action.",
     "Crafting Bug (Fixed): The 'make_last_ready' flag pattern must be used — not 'if attempts > 1'. make_last_ready is set to True only AFTER confirming a new item appeared in the backpack (serial diff before/after). Blindly using Make Last (btn 21) from the 2nd attempt causes the gump to loop without ever navigating to the correct item.",
     "Refactor History: The dev branch Utils refactor lost several NPC_Trade constants that were module-level in the original ac5cb99 working-beta commit. When the Utils import was added, the local constants were not preserved. Future refactors must audit all usages before removing local definitions.",
+    "BOD Collection (TakeBods): BodCycler_TakeBods.py handles hourly multi-bot BOD collection for collector profiles [ed2, ed3, ed5]. Trigger = hybrid: clock window :55–:05 (server-aligned) AND COLLECTION_COOLDOWN=3300s (55 min) elapsed since last collection. Both gates must pass. last_collection_time is written to stats.json at the end of run_take_bods_cycle(). reset_stats() also stamps it to prevent immediate fire on cycle start.",
+    "BOD Collection (TakeBods): The collection cycle is fully event-driven. Connection wait uses _wait_for_connect() polling Connected() for up to 15s instead of fixed sleeps. Gump wait uses wait_for_gump(BOD_GUMP_ID, 10_000) — 10-second timeout, then skips NPC. No hard Wait() for connection or gump.",
+    "BOD Collection (TakeBods): Before disconnecting ed4 for the collection handoff, the master cycle walks ed4 to (892, 537) as a standby position. run_take_bods_cycle() reconnects ed4 immediately after ed5 disconnects — no further wait.",
+    "BodBookCrate (Origine Replenishment): config key is 'BodBookCrate' (exact casing). When Origine book is empty, _refill_origine_from_book_crate(bbcrate, origine, cycle_type) does a WHOLE-BOOK SWAP: moves depleted Origine into the crate, scans the crate for a BOD book matching the current cycle type (keyword: 'tailor' or 'black' in tooltip) with >50 BODs (parsed via 'deeds in book: N'), moves matching book to backpack, returns new serial. Confirmed tooltip format: 'Bulk Order Book|Blessed|Weight: 1 stone|Deeds in book: 392|Book Name: TAILOR'.",
+    "BodBookCrate (Tuple Return): extract_bod_from_origine() returns (0, new_serial) tuple on a book swap, or plain int on success/empty. Call site uses isinstance(result, tuple) to detect a swap: bod, origine = result; if origine==0: break; else continue. The continue re-enters the loop with the updated origine serial so the next BOD is extracted from the new book.",
+    "BOD Routing Bug (Fixed): sort_new_bods() in NPC_Trade was routing ALL small non-bone BODs to Origine, including already-FILLED ones. Root cause: no qty_needed==0 check, and consegna_serial was never loaded in that function. Fix: added consegna_serial lookup; in the else branch, qty_needed==0 sends to Consegna (or Conserva if prize_id>0), qty_needed>0 still goes to Origine.",
+    "Stat Ownership: prized_large is incremented in BodCycler_NPC_Trade.py when a Large BOD is routed to Conserva (after sort_new_bods confirms it). prized_small is incremented in BodCycler_Crafting.py when a filled small BOD is routed to Conserva. prizes_dropped incremented in NPC_Trade when a prize lands in the Reward Crate.",
+    "Assembly: After run_assembler() completes (success or skip), the master cycle immediately runs BodCycler_Scanner.run_scanner() to rebuild inventory.json from world state. This prevents stale JSON from causing the same set to be found again on the next iteration.",
+    "AI Debugger: send_discord_session_report() and call_cloudflare_ai() have been removed. MODEL (DeepSeek) constant removed. Only MODEL_FAST (llama-3.1-8b-instruct-fast) remains. send_error_alert() and send_prize_notification() are the only active Discord functions.",
     "Stealth API: Use FindCount() not GetFindCount()",
     "Stealth API: CloseSimpleGump must be iterated backwards",
     "Gump Parsing: 'Amount' field is plain text (GumpText), others are HTML (XmfHTMLGumpColor)",
@@ -44,7 +54,7 @@
     {
       "filename": "BodCycler_Config.py",
       "description": "The Command Center. Tkinter GUI for setting target serials, saving home coordinates, testing travel routes, and running the Master Cycle.",
-      "content": "Generates config JSONs, reads live stats/supplies, manages hot-reloaded daemon threads, and writes global abort states."
+      "content": "Generates config JSONs, reads live stats/supplies, manages hot-reloaded daemon threads, and writes global abort states. Master cycle order: Crafting → Supplies → Assembly (with post-run re-scan) → Trade. BOD collection check uses BodCycler_TakeBods.should_collect_bods() (hybrid clock+cooldown). Before handoff, walks ed4 to (892,537). reset_stats() stamps last_collection_time to prevent immediate fire on start."
     },
     {
       "filename": "BodCycler_CheckSupplies.py",
@@ -54,7 +64,7 @@
     {
       "filename": "BodCycler_Crafting.py",
       "description": "Intelligently extracts BODs, checks missing quantities, pulls needed materials from the crate, crafts items cleanly, and fills the BOD.",
-      "content": "Standalone (not using BodCycler_Utils). Imports from bod_data, bod_crafting_data, BodCycler_Item_Verification. Key logic: make_last_ready flag, mat_btn!=6 guard for Resources tab navigation, item serial diff for craft detection, Verifier.test_item_acceptance() for ID mismatch resolution."
+      "content": "Standalone (not using BodCycler_Utils). Imports from bod_data, bod_crafting_data, BodCycler_Item_Verification. Key logic: make_last_ready flag, mat_btn!=6 guard for Resources tab navigation, item serial diff for craft detection, Verifier.test_item_acceptance() for ID mismatch resolution. BodBookCrate: _refill_origine_from_book_crate(bbcrate, origine, cycle_type) does whole-book swap. extract_bod_from_origine returns (0, new_serial) tuple on swap. Caller uses isinstance() to detect swap and continue with new origine. cycle_type read from config, passed through both signatures. append_to_inventory() called for all small BODs going to Conserva."
     },
     {
       "filename": "BodCycler_Item_Verification.py",
@@ -63,8 +73,23 @@
     },
     {
       "filename": "BodCycler_NPC_Trade.py",
-      "description": "Handles the core trade cycle. Drops Consegna BODs onto Tailor, accepts new BODs, files them to Origine, buys cloth bolts using fallbacks, cuts them, and recalls home.",
-      "content": "Imports shared helpers from BodCycler_Utils. Has a local constants block for NPC-Trade-specific values. target_trades and buy_cloth_amount are required from config (no fallback). SetContextMenuHook for NPC interactions, AutoBuy with fallback IDs, backup location recalls."
+      "description": "Handles the core trade cycle. Drops Consegna BODs onto Tailor, accepts new BODs, sorts them, buys cloth bolts, cuts them, and recalls home.",
+      "content": "sort_new_bods() now loads consegna_serial and checks qty_needed==0 on small BODs: filled BODs go to Consegna/Conserva (not Origine). prized_large incremented here when Large BOD enters Conserva. Imports shared helpers from BodCycler_Utils. Local constants block for NPC-Trade-specific values."
+    },
+    {
+      "filename": "BodCycler_TakeBods.py",
+      "description": "Multi-bot hourly BOD collection. Cycles through collector profiles (ed2, ed3, ed5), collects 1 BOD from Tailor + Blacksmith each, stores them in books, then reconnects ed4.",
+      "content": "should_collect_bods(): clock window :55-:05 AND last_collection_time >= 3300s ago (both gates). _wait_for_connect(): polls Connected() up to 15s. _get_bod(): uses wait_for_gump(10s timeout), skips NPC on timeout. run_take_bods_cycle(): event-driven, writes last_collection_time to stats.json on completion. NPC serials: NPCB=0x0002D23A (Smith), NPCT=0x0002D1D4 (Tailor)."
+    },
+    {
+      "filename": "BodCycler_AI_Debugger.py",
+      "description": "Discord + Cloudflare AI integration for error alerts and prize notifications.",
+      "content": "Active functions: send_error_alert() (uses MODEL_FAST=llama-3.1-8b for 1-sentence Discord alerts), send_prize_notification() (instant Discord embed on prize secured), log_failure(), should_trash(), evaluate_riprova_queue(). Removed: MODEL (DeepSeek), call_cloudflare_ai(), send_discord_session_report()."
+    },
+    {
+      "filename": "BodCycler_Assembler.py",
+      "description": "Scans the Conserva book to identify and build complete Large BOD sets.",
+      "content": "append_to_inventory(bod_obj): appends a BOD entry to inventory.json with pos/drop_btn/page auto-populated. find_completable_sets(inventory): fast JSON-only check for complete sets. run_assembler(): physically verifies and moves BODs in-world."
     }
   ]
 }

@@ -16,7 +16,6 @@ CF_ACCOUNT_ID = os.getenv("CF_ACCOUNT_ID")
 CF_API_TOKEN = os.getenv("CF_API_TOKEN")
 DISCORD_WEBHOOK = os.getenv("DISCORD_WEBHOOK")
 MODEL_FAST = os.getenv("MODEL_FAST", "@cf/meta/llama-3.1-8b-instruct-fast")
-MODEL = os.getenv("MODEL_ANALYSIS", "@cf/deepseek-ai/deepseek-r1-distill-qwen-32b")
 
 # Dynamically set the file paths to match the main scripts (e.g. LA FABBRICA_bodcycler_stats.json)
 try:
@@ -64,10 +63,6 @@ def _call_cf(model, prompt, system_instruction, max_tokens=256, timeout=10):
 
     return "AI request failed after 5 retries."
 
-
-def call_cloudflare_ai(prompt, system_instruction="You are a helpful assistant for an Ultima Online bot developer."):
-    """Calls Cloudflare Workers AI (deep analysis, ~60s timeout)."""
-    return _call_cf(MODEL, prompt, system_instruction, max_tokens=2048, timeout=90)
 
 def log_failure(item_name, reason, material):
     """Logs a failure to the learning engine to track efficiency."""
@@ -173,94 +168,3 @@ def send_error_alert(event_type, bod_name, detail, had_resources):
         print(f"Discord error alert failed: {e}")
 
 
-def send_discord_session_report():
-    """Sends a detailed Discord report tracking specific materials used, speed, and rewards."""
-    if not DISCORD_WEBHOOK: return
-
-    stats = {}
-    if os.path.exists(STATS_FILE):
-        try:
-            with open(STATS_FILE, "r") as f: stats = json.load(f)
-        except: pass
-        
-    supplies = {}
-    if os.path.exists(SUPPLY_FILE):
-        try:
-            with open(SUPPLY_FILE, "r") as f: supplies = json.load(f)
-        except: pass
-        
-    db = {}
-    if os.path.exists(LEARNING_DB):
-        try:
-            with open(LEARNING_DB, "r") as f: db = json.load(f)
-        except: pass
-
-    # 1. Calculate Production and Speed
-    crafted = stats.get("crafted", 0)
-    session_start = stats.get("session_start", time.time())
-    hours_elapsed = (time.time() - session_start) / 3600.0
-    if hours_elapsed < 0.01: hours_elapsed = 0.01 # Prevent divide by zero error on instant stops
-    bods_per_hour = round(crafted / hours_elapsed, 1)
-
-    # 2. Extract Rewards
-    cbds = stats.get("cbd_count", 0)
-    barbed_kits = stats.get("barbed_kit_count", 0)
-    prizes_small = stats.get("prized_small", 0)
-    prizes_large = stats.get("prized_large", 0)
-    total_prizes = cbds + barbed_kits + prizes_small + prizes_large
-    
-    yield_eff = round((total_prizes / crafted) * 100 if crafted > 0 else 0, 1)
-    recovery_hits = stats.get("recovery_success", 0)
-
-    # 3. Extract Materials Consumed
-    mats_used = stats.get("mats_used", {})
-    used_cloth = mats_used.get("cloth", 0)
-    used_leather = mats_used.get("leather", 0)
-    used_spined = mats_used.get("spined", 0)
-    used_horned = mats_used.get("horned", 0)
-    used_barbed = mats_used.get("barbed", 0)
-
-    # Aggregate current Supplies
-    res = supplies.get("resources", {})
-    cloth = res.get("Cloth", 0)
-    iron = res.get("Ingots", 0)
-    leather = res.get("Leather", 0)
-    spined = res.get("Spined", 0)
-    horned = res.get("Horned", 0)
-    barbed = res.get("Barbed", 0)
-
-    # Identify most failed items from the learning engine
-    top_failures = sorted(db.items(), key=lambda x: x[1].get('failures', 0), reverse=True)[:3]
-    fail_str = ", ".join([f"{k} ({v['failures']}x)" for k, v in top_failures]) if top_failures else "None"
-
-    # Call Cloudflare AI for a brief, intelligent summary of the run
-    ai_prompt = (
-        f"Analyze this Ultima Online bot session data briefly (2 sentences max). "
-        f"Crafted: {crafted} at {bods_per_hour}/hr, High-Tier Loot: {cbds} CBDs, {barbed_kits} Barbed Kits. "
-        f"Mats used: Cloth {used_cloth}, Leather {used_leather}, Barbed {used_barbed}. "
-        f"Most failed items: {fail_str}."
-    )
-    ai_analysis = call_cloudflare_ai(ai_prompt)
-
-    payload = {
-        "username": "BOD Cycler Intelligence",
-        "embeds": [{
-            "title": "📊 BOD Cycler: End of Session Report",
-            "color": 3447003, # Blue
-            "fields": [
-                {"name": "⚙️ Production", "value": f"**Total Crafted:** {crafted}\n**Speed:** {bods_per_hour} BODs/hr\n**Yield Eff:** {yield_eff}%", "inline": True},
-                {"name": "🎯 Saved for Prizes", "value": f"**Small BODs:** {prizes_small}\n**Large BODs:** {prizes_large}\n**Total Saved:** {prizes_small + prizes_large}", "inline": True},
-                {"name": "🏆 High-Tier Loot", "value": f"**CBDs:** {cbds}\n**Barbed Kits:** {barbed_kits}", "inline": True},
-                {"name": "🔥 Materials Consumed", "value": f"**Cloth:** {used_cloth} | **Leather:** {used_leather}\n**Spined:** {used_spined} | **Horned:** {used_horned} | **Barbed:** {used_barbed}", "inline": False},
-                {"name": "📦 Current Reserves", "value": f"**Cloth:** {cloth}  |  **Iron:** {iron}\n**Leather:** {leather} (N) / {spined} (S) / {horned} (H) / {barbed} (B)", "inline": False},
-                {"name": "🔄 Riprova Recovery", "value": f"**Recovered BODs:** {recovery_hits}\n**Top Failures:** {fail_str}", "inline": False},
-                {"name": "🧠 AI Session Insights", "value": ai_analysis, "inline": False}
-            ],
-            "footer": {"text": f"Session End: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} • Hot-Reload Active"}
-        }]
-    }
-
-    try:
-        requests.post(DISCORD_WEBHOOK, json=payload, timeout=10)
-    except Exception as e:
-        print(f"Discord report failed: {e}")

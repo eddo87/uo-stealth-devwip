@@ -70,7 +70,8 @@ def move_to_npc(npc):
 
 def sort_new_bods(config):
     """Smart Sorter: Small -> Origine | Valuable Large -> Conserva | Junk Large -> Scartare."""
-    origine_serial = config.get("books", {}).get("Origine", 0)
+    origine_serial  = config.get("books", {}).get("Origine", 0)
+    consegna_serial = config.get("books", {}).get("Consegna", 0)
     conserva_serial = config.get("books", {}).get("Conserva", 0)
     scartare_serial = config.get("books", {}).get("Scartare", 0)
     
@@ -131,8 +132,16 @@ def sort_new_bods(config):
                 dest_book = scartare_serial
                 dest_name = "Scartare"
         else:
-            # Small BODs go to Origine to be crafted
-            if origine_serial != 0:
+            if info.get('qty_needed', 1) == 0:
+                # Already filled — re-route instead of contaminating Origine
+                if info.get('prize_id') and info.get('prize_id') > 0 and conserva_serial != 0:
+                    dest_book = conserva_serial
+                    dest_name = "Conserva"
+                elif consegna_serial != 0:
+                    dest_book = consegna_serial
+                    dest_name = "Consegna"
+            elif origine_serial != 0:
+                # Unfilled small non-bone BOD → needs crafting
                 dest_book = origine_serial
                 dest_name = "Origine"
                 
