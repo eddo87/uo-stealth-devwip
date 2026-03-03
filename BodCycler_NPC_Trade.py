@@ -51,6 +51,23 @@ def find_tailor():
     if tailors: return tailors[0]
     return 0
 
+def find_all_tailors():
+    """Returns all tailor/weaver NPCs found within search distance."""
+    SetFindDistance(12)
+    weavers, tailors = [], []
+    for npc_type in NPC_TYPES:
+        FindTypeEx(npc_type, 0xFFFF, Ground(), False)
+        for npc in GetFoundList():
+            name = GetName(npc).lower()
+            title = GetAltName(npc).lower()
+            if 'guildmaster' in name or 'guildmaster' in title:
+                continue
+            if 'weaver' in name or 'weaver' in title:
+                weavers.append(npc)
+            elif 'tailor' in name or 'tailor' in title:
+                tailors.append(npc)
+    return weavers + tailors
+
 def move_to_npc(npc):
     if npc > 0 and GetDistance(npc) > 1:
         newMoveXY(GetX(npc), GetY(npc), False, 1, True)
@@ -121,11 +138,8 @@ def sort_new_bods(config):
                 dest_name = "Scartare"
         else:
             if info.get('qty_needed', 1) == 0:
-                # Already filled — re-route instead of contaminating Origine
-                if info.get('prize_id') and info.get('prize_id') > 0 and conserva_serial != 0:
-                    dest_book = conserva_serial
-                    dest_name = "Conserva"
-                elif consegna_serial != 0:
+                # Already filled — route to Consegna to be traded
+                if consegna_serial != 0:
                     dest_book = consegna_serial
                     dest_name = "Consegna"
             elif origine_serial != 0:
@@ -184,7 +198,11 @@ def trade_bod(npc, bod_serial):
     world_save_guard()
     move_to_npc(npc)
     MoveItem(bod_serial, 1, npc, 0, 0, 0)
-    Wait(2000) 
+    Wait(3500)
+    FindType(BOD_TYPE, Backpack())
+    if bod_serial in GetFoundList():
+        AddToSystemJournal(f"trade_bod: BOD {hex(bod_serial)} still in backpack — MoveItem failed.")
+        return False
     return True
 
 def find_bod_offer_gump():
@@ -202,19 +220,24 @@ def request_new_bod(npc):
     world_save_guard()
     move_to_npc(npc)
     SetContextMenuHook(npc, CTX_BOD)
+    Wait(250)
     RequestContextMenu(npc)
-    
+
     t = time.time()
     found_idx = -1
     while time.time() - t < 3:
         world_save_guard()
         found_idx = find_bod_offer_gump()
         if found_idx != -1: break
-        Wait(100) 
-        
+        Wait(100)
+
     if found_idx != -1:
         NumGumpButton(found_idx, BTN_ACCEPT_BOD)
-        Wait(1200) 
+        Wait(1200)
+        return True
+
+    AddToSystemJournal("request_new_bod: No BOD offer gump — NPC may be on cooldown.")
+    return False
 
 def buy_and_cut_cloth(npc, amount=80):
     world_save_guard()
@@ -237,10 +260,10 @@ def buy_and_cut_cloth(npc, amount=80):
             
         world_save_guard()
         SetContextMenuHook(npc, CTX_BUY)
-        Wait(500)
+        Wait(250)
         world_save_guard()
         RequestContextMenu(npc)
-        Wait(1500)
+        Wait(999)
         
         try: 
             AutoBuy(bolt_id, 0xFFFF, 0)
@@ -390,7 +413,7 @@ def execute_trade_loop():
     travel_method = config.get("travel", {}).get("Method", "Recall")
     home_x = config.get("home", {}).get("X", 0)
     home_y = config.get("home", {}).get("Y", 0)
-    
+
     trash_serial = config.get("containers", {}).get("TrashBarrel", 0)
     crate_serial = config.get("containers", {}).get("MaterialCrate", 0)
     dye_tub_serial = config.get("containers", {}).get("ClothDyeTub", 0)
@@ -400,58 +423,91 @@ def execute_trade_loop():
 
     close_all_gumps()
 
-    tailor1_idx = config.get("travel", {}).get("Runes", {}).get("Tailor1", 3)
-    tailor2_idx = config.get("travel", {}).get("Runes", {}).get("Tailor2", 7)
-    
-    travel_to(rb_serial, travel_method, tailor1_idx)
-    target_npc = find_tailor()
-    
-    if target_npc == 0:
-        travel_to(rb_serial, travel_method, tailor2_idx)
-        target_npc = find_tailor()
-        
-    if target_npc == 0: return
-    
-    request_new_bod(target_npc)
+    # Collect all available tailor NPCs. Travel to each configured rune location
+    # in order and stop as soon as at least one NPC is found. If NPCs are at
+    # different locations (e.g. Tailor1 + Tailor3), set Tailor2 = 0 to skip it.
+    npc_list = []
+    for rune_key in ["Tailor1", "Tailor2", "Tailor3"]:
+        rune_idx = config.get("travel", {}).get("Runes", {}).get(rune_key, 0)
+        if rune_idx == 0:
+            continue
+        travel_to(rb_serial, travel_method, rune_idx)
+        for npc in find_all_tailors():
+            if npc not in npc_list:
+                npc_list.append(npc)
+        if npc_list:
+            break  # Found NPCs here — no need to travel further
+
+    if not npc_list:
+        AddToSystemJournal("execute_trade_loop: No tailors found at any configured location.")
+        return
+
+    AddToSystemJournal(f"execute_trade_loop: Found {len(npc_list)} NPC(s) to cycle through.")
+
+    request_new_bod(npc_list[0])
     sort_new_bods(config)
     Wait(1500)
 
     trades_completed = 0
-    
+    npc_index = 0
+    consecutive_failures = 0
+    AddToSystemJournal(f"execute_trade_loop: Starting — target {target_trades} trades.")
+
     while trades_completed < target_trades:
-        if check_abort(): break
+        if check_abort():
+            AddToSystemJournal("execute_trade_loop: Stop signal received.")
+            break
         world_save_guard()
-        
+
+        npc_pos = npc_index % len(npc_list)
+        current_npc = npc_list[npc_pos]
+
         if GetType(consegna_serial) == BOOK_TYPE:
             bod_to_give = extract_bod_from_book(consegna_serial)
         else:
             FindType(BOD_TYPE, consegna_serial)
             bod_to_give = FindItem() if FindCount() > 0 else 0
-            
-        if bod_to_give == 0: break
-            
-        success = trade_bod(target_npc, bod_to_give)
-        if success:
-            trades_completed += 1
-            request_new_bod(target_npc)
-            sort_new_bods(config)
-            Wait(1500)
-        else:
+
+        if bod_to_give == 0:
+            AddToSystemJournal("execute_trade_loop: Consegna book is empty — stopping.")
             break
-            
+
+        if not trade_bod(current_npc, bod_to_give):
+            consecutive_failures += 1
+            AddToSystemJournal(f"execute_trade_loop: Trade failed with NPC #{npc_pos + 1} — rotating. ({consecutive_failures}/{len(npc_list)} failures)")
+            sort_new_bods(config)  # routes the failed BOD back to Consegna
+            npc_index += 1
+            if consecutive_failures >= len(npc_list):
+                AddToSystemJournal("execute_trade_loop: All NPCs on cooldown or unreachable — stopping.")
+                BodCycler_AI_Debugger.send_error_alert("trade_failure", hex(bod_to_give), "All NPCs failed", False)
+                break
+            Wait(500)
+            continue
+
+        consecutive_failures = 0
+        trades_completed += 1
+        AddToSystemJournal(f"execute_trade_loop: Trade {trades_completed}/{target_trades} complete (NPC #{npc_pos + 1}).")
+
+        got_bod = request_new_bod(current_npc)
+        if not got_bod:
+            AddToSystemJournal("execute_trade_loop: No new BOD offer — NPC may be on cooldown.")
+        sort_new_bods(config)
+        npc_index += 1  # rotate to next NPC for next trade
+        Wait(1500)
+
     if not check_abort():
         if buy_cloth_enabled:
-            buy_and_cut_cloth(target_npc, buy_cloth_amount)
+            buy_and_cut_cloth(npc_list[0], buy_cloth_amount)
         else:
             AddToSystemJournal("Buy Cloth: OFF — skipping.")
         ws1_index = config.get("travel", {}).get("Runes", {}).get("WorkSpot1", 1)
         travel_to(rb_serial, travel_method, ws1_index)
-        
+
         if home_x != 0 and home_y != 0:
             newMoveXY(home_x, home_y, True, 0, True)
-            
+
         process_prizes_at_home(trash_serial, crate_serial, dye_tub_serial, reward_crate_serial, rb_serial)
-        
+
     AddToSystemJournal("Route Complete. Cycle successful.")
 
 if __name__ == '__main__':

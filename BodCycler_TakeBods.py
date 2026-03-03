@@ -140,9 +140,10 @@ def run_take_bods_cycle():
         Disconnect()
 
     # Restore crafter immediately — no fixed wait window
+    Wait(MIN_PAUSE)
     AddToSystemJournal(f"Switching back to crafter profile: {CRAFTER_PROFILE}")
     ChangeProfile(CRAFTER_PROFILE)
-    Wait(MIN_PAUSE)
+    Wait(MED_PAUSE)
     Connect()
 
     if not _wait_for_connect():

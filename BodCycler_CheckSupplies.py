@@ -80,6 +80,7 @@ def save_supplies_to_json(data):
         with open(SUPPLY_FILE, "w") as f:
             json.dump(data, f, indent=4)
         #AddToSystemJournal("Supply counts saved to JSON.")
+        Wait(10)
     except Exception as e:
         AddToSystemJournal(f"Error saving supply data: {e}")
 
@@ -238,7 +239,7 @@ def maintain_tool_stock(tool_name, type_id, make_button, bp_target, crate_target
 
     final_bp = count_items(type_id, backpack_id)
     final_crate = count_items(type_id, crate_id)
-    @AddToSystemJournal(f"Stock Check {tool_name}: BP {final_bp}/{bp_target}, Crate {final_crate}/{crate_target}")
+    # AddToSystemJournal(f"Stock Check {tool_name}: BP {final_bp}/{bp_target}, Crate {final_crate}/{crate_target}")
     
     return final_bp + final_crate
 

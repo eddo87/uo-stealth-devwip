@@ -163,26 +163,31 @@ class BodCyclerGUI(threading.Thread):
     # --- Single Trigger Methods (Manual Testing) ---
     def trigger_supply_check(self):
         self.save_config()
+        self.set_global_status("Running (Supplies)")
         ClientPrintEx(Self(), 1, 1, "Starting Supply Check...")
         threading.Thread(target=BodCycler_CheckSupplies.check_supplies, daemon=True).start()
 
     def trigger_crafting(self):
         self.save_config()
+        self.set_global_status("Running (Crafting)")
         ClientPrintEx(Self(), 1, 1, "Starting Crafting Engine...")
         threading.Thread(target=BodCycler_Crafting.run_crafting_cycle, daemon=True).start()
 
     def trigger_trade(self):
         self.save_config()
+        self.set_global_status("Running (Trade)")
         ClientPrintEx(Self(), 1, 1, "Starting NPC Trade Loop...")
         threading.Thread(target=BodCycler_NPC_Trade.execute_trade_loop, daemon=True).start()
 
     def trigger_scan(self):
         self.save_config()
+        self.set_global_status("Running (Scan)")
         ClientPrintEx(Self(), 1, 1, "Scanning Conserva Book...")
         threading.Thread(target=BodCycler_Scanner.run_scanner, daemon=True).start()
 
     def trigger_assemble(self):
         self.save_config()
+        self.set_global_status("Running (Assembling)")
         ClientPrintEx(Self(), 1, 1, "Assembling Large BODs...")
         threading.Thread(target=BodCycler_Assembler.run_assembler, daemon=True).start()
 
