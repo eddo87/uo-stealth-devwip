@@ -717,14 +717,19 @@ def run_crafting_cycle():
         info = parse_bod(bod)
         
         if info['qty_needed'] <= 0:
+            # BOD is already filled — still counts as a processed BOD for the cycle.
+            session_crafted += 1
             dest = conserva if (info['prize_id'] and info['prize_id'] > 0) else consegna
+            _small = 0
             if dest == conserva and not info['is_large']:
                 session_small += 1
+                _small = 1
                 BodCycler_Assembler.append_to_inventory({"type": "Small", "category": info['cat'], "item": info['item_name'], "material": info['material'].title(), "quality": "Exceptional" if info['is_except'] else "Normal", "amount": info['qty_total']})
                 AddToSystemJournal(f"[Conserva] {info['item_name']} {info['material']} x{info['qty_total']} → prize #{info['prize_id']}")
             MoveItem(bod, 0, dest, 0, 0, 0)
             Wait(1000)
             close_all_gumps()
+            update_stats(1, _small)
             continue
 
         BONE_ITEM_NAMES = {"bone helmet", "bone gloves", "bone arms", "bone leggings", "bone armor"}
@@ -783,14 +788,17 @@ def run_crafting_cycle():
                     continue
             
         is_full = fill_bod_completely(bod, item_id, info['qty_needed'], info['item_name'], info['is_except'])
-                     
+
         close_all_gumps()
-        
+        _crafted = 0
+        _small = 0
         if is_full:
             session_crafted += 1
+            _crafted = 1
             dest = conserva if (info['prize_id'] and info['prize_id'] > 0) else consegna
             if dest == conserva and not info['is_large']:
                 session_small += 1
+                _small = 1
                 BodCycler_Assembler.append_to_inventory({"type": "Small", "category": info['cat'], "item": info['item_name'], "material": info['material'].title(), "quality": "Exceptional" if info['is_except'] else "Normal", "amount": info['qty_total']})
                 AddToSystemJournal(f"[Conserva] {info['item_name']} {info['material']} x{info['qty_total']} → prize #{info['prize_id']}")
         else:
@@ -800,20 +808,23 @@ def run_crafting_cycle():
             close_all_gumps()
             if is_full:
                 session_crafted += 1
+                _crafted = 1
                 dest = conserva if (info['prize_id'] and info['prize_id'] > 0) else consegna
                 if dest == conserva and not info['is_large']:
                     session_small += 1
+                    _small = 1
                     BodCycler_Assembler.append_to_inventory({"type": "Small", "category": info['cat'], "item": info['item_name'], "material": info['material'].title(), "quality": "Exceptional" if info['is_except'] else "Normal", "amount": info['qty_total']})
                     AddToSystemJournal(f"[Conserva] {info['item_name']} {info['material']} x{info['qty_total']} → prize #{info['prize_id']}")
             else:
                 # Retry also failed — send to Riprova silently
                 dest = riprova
-            
+
         MoveItem(bod, 0, dest, 0, 0, 0)
         Wait(1000)
         close_all_gumps()
+        if _crafted:
+            update_stats(1, _small)
 
-    update_stats(session_crafted, session_small)
     AddToSystemJournal("=== Crafting Cycle Complete ===")
 
 
