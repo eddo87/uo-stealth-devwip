@@ -339,11 +339,19 @@ class BodCyclerGUI(threading.Thread):
                         _sets = BodCycler_Assembler.find_completable_sets(_inv)
 
                         if _sets:
-                            AddToSystemJournal(f"Assembly: {len(_sets)} set(s) ready in JSON. Running Assembler...")
+                            sets_expected = len(_sets)
+                            AddToSystemJournal(f"Assembly: {sets_expected} set(s) ready in JSON. Running Assembler...")
                             self.set_global_status("Running (Assembling)")
-                            BodCycler_Assembler.run_assembler()
-                            AddToSystemJournal("Assembly: Re-scanning to update inventory after assembly attempt...")
-                            BodCycler_Scanner.run_scanner()
+                            sets_completed = BodCycler_Assembler.run_assembler()
+                            # Only re-scan when the assembly was incomplete (partial extraction
+                            # failure leaves the actual book with more items than the JSON
+                            # re-index assumes, causing append_to_inventory() to mis-number
+                            # new items in future cycles). A clean run trusts the re-index.
+                            if sets_completed < sets_expected:
+                                AddToSystemJournal(f"Assembly: Only {sets_completed}/{sets_expected} set(s) completed — re-scanning to correct positions.")
+                                BodCycler_Scanner.run_scanner()
+                            else:
+                                AddToSystemJournal(f"Assembly: All {sets_completed} set(s) completed. Positions re-indexed.")
                         else:
                             AddToSystemJournal("Assembly: No complete sets found in local records.")
                     else:

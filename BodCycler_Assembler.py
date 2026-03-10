@@ -116,9 +116,15 @@ def extract_bods(book_serial, target_bods):
         world_save_guard()
         
         close_all_gumps()
-        FindType(BOD_TYPE, Backpack()) 
+        # Cancel any lingering target cursor left by crafting tools (scissors/tongs).
+        # If TargetPresent() is True, UseObject() is consumed as a target click
+        # instead of opening the book, causing the gump to never appear (idx = -1).
+        if TargetPresent():
+            CancelTarget()
+            Wait(300)
+        FindType(BOD_TYPE, Backpack())
         before_bods = list(GetFoundList())
-        
+
         UseObject(book_serial)
         
         t = time.time()
