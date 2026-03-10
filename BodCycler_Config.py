@@ -7,7 +7,7 @@ import time
 import BodCycler_AI_Debugger
 from tkinter import *
 from datetime import datetime
-from BodCycler_Utils import set_status, read_stats, write_stats
+from BodCycler_Utils import set_status, read_stats, write_stats, save_performance_snapshot
 
 # Import the logic modules
 try:
@@ -255,6 +255,7 @@ class BodCyclerGUI(threading.Thread):
         data["prized_small"] = 0
         data["prized_large"] = 0
         data["prizes_dropped"] = 0
+        data["bods_traded"] = 0
         data["mats_used"] = {}
         data["recovery_success"] = 0
         data["session_start"] = time.time()
@@ -372,6 +373,7 @@ class BodCyclerGUI(threading.Thread):
                 self.set_global_status("Error (See Journal)")
                 # Continue the loop rather than permanently breaking on transient errors
 
+        save_performance_snapshot()
         AddToSystemJournal("=== MASTER CYCLE STOPPED ===")
 
     def start_cycling(self):
@@ -550,7 +552,10 @@ class BodCyclerGUI(threading.Thread):
         f_metric2.pack(fill="x", pady=(0, 2))
         Label(f_metric2, textvariable=self.vars["stat_prizes"], fg="darkorange", font=("Arial", 10, "bold")).pack(side=LEFT, expand=True)
         
-        Button(lf_stats, text="Reset Stats", command=self.reset_stats, font=("Arial", 8)).pack(pady=4)
+        f_stat_btns = Frame(lf_stats)
+        f_stat_btns.pack(pady=4)
+        Button(f_stat_btns, text="Reset Stats", command=self.reset_stats, font=("Arial", 8)).pack(side=LEFT, padx=4)
+        Button(f_stat_btns, text="Save Report", command=save_performance_snapshot, font=("Arial", 8), bg="#C8E6C9").pack(side=LEFT, padx=4)
 
         self.vars["timer"] = StringVar(value="Time: 00:00:00")
         self.vars["status"] = StringVar(value="Status: Idle")

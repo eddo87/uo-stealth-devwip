@@ -19,10 +19,11 @@ except ImportError:
 # Shared File Paths
 # All scripts must use these — never re-declare them locally.
 # ---------------------------------------------------------------------------
-CONFIG_FILE    = f"{StealthPath()}Scripts\\{CharName()}_bodcycler_config.json"
-STATS_FILE     = f"{StealthPath()}Scripts\\{CharName()}_bodcycler_stats.json"
-INVENTORY_FILE = f"{StealthPath()}Scripts\\{CharName()}_bodcycler_inventory.json"
-SUPPLY_FILE    = f"{StealthPath()}Scripts\\{CharName()}_bodcycler_supplies.json"
+CONFIG_FILE      = f"{StealthPath()}Scripts\\{CharName()}_bodcycler_config.json"
+STATS_FILE       = f"{StealthPath()}Scripts\\{CharName()}_bodcycler_stats.json"
+INVENTORY_FILE   = f"{StealthPath()}Scripts\\{CharName()}_bodcycler_inventory.json"
+SUPPLY_FILE      = f"{StealthPath()}Scripts\\{CharName()}_bodcycler_supplies.json"
+PERFORMANCE_FILE = f"{StealthPath()}Scripts\\{CharName()}_bodcycler_performance.json"
 
 # ---------------------------------------------------------------------------
 # Shared Game Constants
@@ -130,6 +131,59 @@ def wait_for_gump(gump_id, timeout_ms=3000):
                 return i
         Wait(50)
     return -1
+
+def save_performance_snapshot():
+    """
+    Appends a per-hour performance entry to PERFORMANCE_FILE at the end of every cycle
+    (user-stopped or error-stopped). Reads current stats to calculate rates.
+    The AI debugger can load this file to spot efficiency trends over time.
+    """
+    stats = read_stats()
+    session_start = stats.get("session_start", 0)
+    if not session_start:
+        return
+
+    elapsed_seconds = time.time() - session_start
+    elapsed_hours = elapsed_seconds / 3600.0
+    if elapsed_hours < (1 / 60):  # skip snapshots shorter than 1 minute
+        return
+
+    bods_filled = stats.get("crafted", 0)
+    bods_traded = stats.get("bods_traded", 0)
+    filled_per_hour = round(bods_filled / elapsed_hours, 2) if elapsed_hours > 0 else 0.0
+    traded_per_hour = round(bods_traded / elapsed_hours, 2) if elapsed_hours > 0 else 0.0
+
+    entry = {
+        "date": __import__("datetime").datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "duration_hours": round(elapsed_hours, 3),
+        "bods_filled": bods_filled,
+        "bods_traded": bods_traded,
+        "filled_per_hour": filled_per_hour,
+        "traded_per_hour": traded_per_hour,
+    }
+
+    db = {"sessions": []}
+    if os.path.exists(PERFORMANCE_FILE):
+        try:
+            with open(PERFORMANCE_FILE, "r") as f:
+                db = json.load(f)
+        except Exception:
+            pass
+
+    db.setdefault("sessions", []).append(entry)
+
+    tmp = PERFORMANCE_FILE + ".tmp"
+    try:
+        with open(tmp, "w") as f:
+            json.dump(db, f, indent=4)
+        os.replace(tmp, PERFORMANCE_FILE)
+        AddToSystemJournal(
+            f"Performance snapshot saved: {bods_filled} filled ({filled_per_hour}/h), "
+            f"{bods_traded} traded ({traded_per_hour}/h) over {round(elapsed_hours, 2)}h"
+        )
+    except Exception as e:
+        AddToSystemJournal(f"Utils: Failed to write performance snapshot — {e}")
+
 
 def wait_for_gump_serial_change(current_serial, gump_id, timeout_ms=8000):
     """

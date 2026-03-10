@@ -495,6 +495,11 @@ def execute_trade_loop():
         npc_index += 1  # rotate to next NPC for next trade
         Wait(1500)
 
+    if trades_completed > 0:
+        stats = read_stats()
+        stats["bods_traded"] = stats.get("bods_traded", 0) + trades_completed
+        write_stats(stats)
+
     if not check_abort():
         if buy_cloth_enabled:
             buy_and_cut_cloth(npc_list[0], buy_cloth_amount)
