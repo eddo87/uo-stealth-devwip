@@ -61,6 +61,48 @@ def append_to_inventory(bod_obj):
         except Exception as e:
             AddToSystemJournal(f"State Management Error: Failed to write to JSON — {e}")
 
+def reindex_inventory():
+    """Re-calculates pos, drop_btn, and page for every entry in the inventory JSON.
+
+    Entries are sorted by their current pos value to preserve relative order,
+    then renumbered 0..N-1.  Useful after a manual scanner re-scan or any
+    out-of-band edit that left the file with gaps or stale page numbers.
+
+    Formulas (same as append_to_inventory and extract_bods):
+        drop_btn = 5 + (pos * 2)
+        page     = (pos // 10) + 1
+    """
+    with _INV_LOCK:
+        if not os.path.exists(INVENTORY_FILE):
+            AddToSystemJournal("Reindex Error: Inventory JSON not found.")
+            return False
+
+        try:
+            with open(INVENTORY_FILE, "r") as f:
+                inventory = json.load(f)
+        except Exception as e:
+            AddToSystemJournal(f"Reindex Error reading inventory: {e}")
+            return False
+
+        inventory.sort(key=lambda b: b.get('pos', 0))
+
+        for new_pos, bod in enumerate(inventory):
+            bod['pos']      = new_pos
+            bod['drop_btn'] = 5 + (new_pos * 2)
+            bod['page']     = (new_pos // 10) + 1
+
+        tmp = INVENTORY_FILE + ".tmp"
+        try:
+            with open(tmp, "w") as f:
+                json.dump(inventory, f, indent=4)
+            os.replace(tmp, INVENTORY_FILE)
+            AddToSystemJournal(f"Reindex complete: {len(inventory)} BODs renumbered (pos 0–{len(inventory)-1}).")
+            return True
+        except Exception as e:
+            AddToSystemJournal(f"Reindex Error writing inventory: {e}")
+            return False
+
+
 def find_completable_sets(inventory):
     smalls = [b for b in inventory if b['type'] == 'Small']
     larges = [b for b in inventory if b['type'] == 'Large']
@@ -105,8 +147,15 @@ def find_completable_sets(inventory):
             
     return completed_sets
 
-def extract_bods(book_serial, target_bods):
-    """Performs a single Reverse Sweep extraction using fast Gump Serial polling."""
+def extract_bods(book_serial, target_bods, inventory=None):
+    """Performs a single Reverse Sweep extraction using fast Gump Serial polling.
+
+    If inventory is provided, re-indexes it in-place after each successful drop:
+    the extracted item is removed and every subsequent item's pos/drop_btn/page
+    decrements by 1 to mirror UO's server-side compaction.  The JSON is saved
+    atomically after each step so append_to_inventory() always has accurate positions,
+    and a crash mid-sweep still leaves the file in a consistent state.
+    """
     # Ensure strict descending order so UO's server indexing doesn't shift for earlier drops
     target_bods.sort(key=lambda x: x['pos'], reverse=True)
     extracted_map = {}
@@ -158,27 +207,91 @@ def extract_bods(book_serial, target_bods):
             if lost_gump:
                 AddToSystemJournal(f"Warning: Lost book gump while turning to page {target_page}.")
                 continue
-                
+
             Wait(200) # Tiny tick to let UI register before dropping
-            NumGumpButton(idx, bod['drop_btn'])
-            
-            # Fast polling for the BOD to hit the backpack
-            t_drop = time.time()
+
+            # Verify the book gump is still open at idx before pressing.
+            # It can close during Wait() if a world save or server event fires.
+            if GetGumpID(idx) != BOOK_GUMP_ID:
+                AddToSystemJournal(f"Warning: Book gump closed before drop for Pos #{bod['pos']}. Skipping.")
+                continue
+
             extracted = False
-            while time.time() - t_drop < 3:
-                Wait(10)
-                FindType(BOD_TYPE, Backpack())
-                after_bods = list(GetFoundList())
-                new_bods = [b for b in after_bods if b not in before_bods]
-                
-                if new_bods:
-                    extracted_map[bod['pos']] = new_bods[0]
-                    extracted = True
+            for attempt in range(2):  # press + one retry
+                NumGumpButton(idx, bod['drop_btn'])
+
+                t_drop = time.time()
+                while time.time() - t_drop < 3:
+                    Wait(10)
+                    FindType(BOD_TYPE, Backpack())
+                    after_bods = list(GetFoundList())
+                    new_bods = [b for b in after_bods if b not in before_bods]
+
+                    if new_bods:
+                        extracted_map[bod['pos']] = new_bods[0]
+                        extracted = True
+                        break
+
+                if extracted:
                     break
-                    
+
+                if attempt == 0:
+                    # First attempt failed — re-open the book to the correct page and retry once
+                    AddToSystemJournal(f"Retry: Pos #{bod['pos']} drop failed, re-opening book...")
+                    close_all_gumps()
+                    Wait(300)
+                    UseObject(book_serial)
+                    t_reopen = time.time()
+                    idx = -1
+                    while time.time() - t_reopen < 3:
+                        Wait(10)
+                        for i in range(GetGumpsCount()):
+                            if GetGumpID(i) == BOOK_GUMP_ID:
+                                idx = i
+                                current_serial = GetGumpInfo(i)['Serial']
+                                break
+                        if idx != -1:
+                            break
+                    if idx == -1:
+                        break  # book didn't reopen — give up
+                    # Navigate back to target_page
+                    current_page = 1
+                    lost_gump = False
+                    while current_page < target_page:
+                        NumGumpButton(idx, NEXT_PAGE_BTN)
+                        idx, current_serial, page_changed = wait_for_gump_serial_change(current_serial, BOOK_GUMP_ID, 8000)
+                        if not page_changed:
+                            lost_gump = True
+                            break
+                        current_page += 1
+                    if lost_gump:
+                        break  # couldn't reach the page on retry — give up
+                    Wait(200)
+
             if not extracted:
-                AddToSystemJournal(f"Warning: Expected drop for Pos #{bod['pos']} but got nothing.")
-                
+                AddToSystemJournal(f"Warning: Pos #{bod['pos']} — drop not confirmed after retry.")
+            elif inventory is not None:
+                # Remove the extracted entry from the working inventory, save the
+                # stripped list to disk, then do a full reindex pass so pos/drop_btn/page
+                # are always recalculated from scratch after every drop.
+                extracted_pos = bod['pos']
+                inventory[:] = [b for b in inventory if b.get('pos') != extracted_pos]
+                with _INV_LOCK:
+                    tmp = INVENTORY_FILE + '.tmp'
+                    try:
+                        with open(tmp, 'w') as f:
+                            json.dump(inventory, f, indent=4)
+                        os.replace(tmp, INVENTORY_FILE)
+                    except Exception as e:
+                        AddToSystemJournal(f"State Management Error: save after extraction failed — {e}")
+                # Full reindex: loads the stripped file, renumbers 0..N-1, saves.
+                if reindex_inventory():
+                    try:
+                        with open(INVENTORY_FILE, 'r') as f:
+                            inventory[:] = json.load(f)
+                    except Exception:
+                        pass
+
     return extracted_map
 
 def combine_and_store(large_serial, small_serials, config):
@@ -286,9 +399,11 @@ def run_assembler():
         
     AddToSystemJournal(f"Extracting {len(all_target_bods)} BODs in a single Reverse Sweep...")
 
-    # 3. Extract all targets back-to-front
-    extracted_map = extract_bods(conserva, all_target_bods)
-    
+    # 3. Extract all targets back-to-front.
+    # Pass inventory so extract_bods() re-indexes it after each individual drop,
+    # keeping the JSON in sync with the server's compacted positions throughout.
+    extracted_map = extract_bods(conserva, all_target_bods, inventory)
+
     sets_completed = 0
     extracted_positions = list(extracted_map.keys())
     
@@ -306,23 +421,9 @@ def run_assembler():
         else:
             AddToSystemJournal("Missing components from extraction. Skipping this set.")
 
-    # 5. Update and Re-Index the JSON Database
+    # 5. JSON is already fully re-indexed by extract_bods() after each individual drop.
     if extracted_positions:
-        # Filter out the successfully extracted BODs
-        new_inventory = [b for b in inventory if b['pos'] not in extracted_positions]
-        
-        # Recalculate physical array positions for UO server syncing
-        for i, bod in enumerate(new_inventory):
-            bod['pos'] = i
-            bod['drop_btn'] = 5 + (i * 2)
-            bod['page'] = (i // 10) + 1  # 10 BODs per page
-            
-        try:
-            with open(INVENTORY_FILE, "w") as f:
-                json.dump(new_inventory, f, indent=4)
-            AddToSystemJournal(f"State Management: Removed {len(extracted_positions)} extracted BODs and re-indexed JSON.")
-        except Exception as e:
-            AddToSystemJournal(f"State Management Error: Could not update JSON. {e}")
+        AddToSystemJournal(f"State Management: {len(extracted_positions)} BODs extracted and JSON re-indexed incrementally.")
 
     if sets_completed > 0:
         stats = read_stats()
