@@ -708,6 +708,17 @@ def run_crafting_cycle():
                 bod, origine = result       # swap: bod=0, origine=new book serial
                 if origine == 0:
                     break                   # no replacement book found
+                # Persist the new Origine serial so subsequent cycles open the correct book
+                try:
+                    cfg = load_config() or {}
+                    cfg.setdefault('books', {})['Origine'] = origine
+                    tmp = CONFIG_FILE + '.tmp'
+                    with open(tmp, 'w') as f:
+                        json.dump(cfg, f, indent=4)
+                    os.replace(tmp, CONFIG_FILE)
+                    AddToSystemJournal(f"Config: Origine updated to {hex(origine)}")
+                except Exception as e:
+                    AddToSystemJournal(f"Config: Failed to persist new Origine serial — {e}")
                 continue                    # retry with new Origine
             elif result == 0:
                 break
