@@ -1,11 +1,7 @@
 from stealth import *
 import time
 from datetime import datetime
-from BodCycler_Utils import read_stats, write_stats, wait_for_gump
-
-# ---- Profile Config ----
-COLLECTOR_PROFILES = ['ed2', 'ed3', 'ed5']
-CRAFTER_PROFILE    = 'ed4'
+from BodCycler_Utils import read_stats, write_stats, wait_for_gump, load_config
 
 # ---- NPC Serials ----
 NPCB = 0x0002D23A   # Blacksmith NPC
@@ -108,14 +104,27 @@ def _store_bods():
 
 def run_take_bods_cycle():
     """
-    Cycles through COLLECTOR_PROFILES sequentially.
+    Cycles through collector profiles sequentially (read from config).
     Event-driven: polls for connection instead of fixed sleeps.
-    As soon as the last collector logs out, ed4 reconnects immediately.
+    As soon as the last collector logs out, the crafter reconnects immediately.
     Writes last_collection_time to stats on completion.
     """
-    AddToSystemJournal("=== BOD COLLECTION CYCLE START ===")
+    config = load_config()
+    if not config:
+        AddToSystemJournal("TakeBods: Could not load config. Aborting collection.")
+        return
 
-    for profile in COLLECTOR_PROFILES:
+    bots_cfg = config.get("bots", {})
+    collector_profiles = bots_cfg.get("collector_profiles", [])
+    crafter_profile = bots_cfg.get("crafter_profile", "ed4")
+
+    if not collector_profiles:
+        AddToSystemJournal("TakeBods: No collector profiles configured. Skipping collection.")
+        return
+
+    AddToSystemJournal(f"=== BOD COLLECTION CYCLE START (collectors: {collector_profiles}, crafter: {crafter_profile}) ===")
+
+    for profile in collector_profiles:
         AddToSystemJournal(f"Switching to profile: {profile}")
         ChangeProfile(profile)
         Wait(MIN_PAUSE)   # brief pause for profile switch
@@ -141,8 +150,8 @@ def run_take_bods_cycle():
 
     # Restore crafter immediately — no fixed wait window
     Wait(MIN_PAUSE)
-    AddToSystemJournal(f"Switching back to crafter profile: {CRAFTER_PROFILE}")
-    ChangeProfile(CRAFTER_PROFILE)
+    AddToSystemJournal(f"Switching back to crafter profile: {crafter_profile}")
+    ChangeProfile(crafter_profile)
     Wait(MED_PAUSE)
     Connect()
 

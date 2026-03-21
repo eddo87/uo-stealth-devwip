@@ -381,9 +381,13 @@ def check_and_pull_materials(material, qty_to_craft, item_cost, crate_serial):
         FindTypeEx(t, mat_color, Backpack(), False)
         bp_qty += FindFullQuantity()
         
-    if bp_qty >= required_units: 
+    if bp_qty >= required_units:
         return True
-    
+
+    if crate_serial == 0:
+        AddToSystemJournal(f"Material check: No crate configured — cannot pull {material}.")
+        return False
+
     AddToSystemJournal(f"Pulling {material} from crate...")
     if crate_serial != 0:
         UseObject(crate_serial)
@@ -768,6 +772,7 @@ def run_crafting_cycle():
         
         if to_make > 0:
             if not check_and_pull_materials(info['material'], to_make, item_cost, crate):
+                AddToSystemJournal(f"[Riprova] {info['item_name']} ({info['material']}) — insufficient materials.")
                 MoveItem(bod, 0, riprova, 0, 0, 0)
                 Wait(1000)
                 close_all_gumps()
@@ -785,13 +790,15 @@ def run_crafting_cycle():
                     success = craft_items_until_done(bod, tool_type, cat_identifier, item_identifier, info['item_name'], item_id, info['qty_needed'], info['is_except'], mat_btn)
                     close_all_gumps()
                     if not success:
-                        # Still failed after retry — send to Riprova silently
+                        # Still failed after retry — send to Riprova
+                        AddToSystemJournal(f"[Riprova] {info['item_name']} ({info['material']}) — craft failed after retry.")
                         MoveItem(bod, 0, riprova, 0, 0, 0)
                         Wait(1000)
                         close_all_gumps()
                         continue
                 else:
                     # Resources missing — true shortage
+                    AddToSystemJournal(f"[Riprova] {info['item_name']} ({info['material']}) — materials exhausted mid-craft.")
                     BodCycler_AI_Debugger.send_error_alert("riprova", info['item_name'], info['material'], False)
                     MoveItem(bod, 0, riprova, 0, 0, 0)
                     Wait(1000)
@@ -827,7 +834,8 @@ def run_crafting_cycle():
                     BodCycler_Assembler.append_to_inventory({"type": "Small", "category": info['cat'], "item": info['item_name'], "material": info['material'].title(), "quality": "Exceptional" if info['is_except'] else "Normal", "amount": info['qty_total']})
                     AddToSystemJournal(f"[Conserva] {info['item_name']} {info['material']} x{info['qty_total']} → prize #{info['prize_id']}")
             else:
-                # Retry also failed — send to Riprova silently
+                # Retry also failed — send to Riprova
+                AddToSystemJournal(f"[Riprova] {info['item_name']} ({info['material']}) — BOD fill failed after retry.")
                 dest = riprova
 
         MoveItem(bod, 0, dest, 0, 0, 0)

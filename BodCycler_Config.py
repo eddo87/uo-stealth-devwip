@@ -75,7 +75,11 @@ DEFAULT_CONFIG = {
             "Tailor2": 7,   "Smith1": 8,    "Smith2": 9
         }
     },
-    "home": { "X": 0, "Y": 0, "Z": 0 }
+    "home": { "X": 0, "Y": 0, "Z": 0 },
+    "bots": {
+        "crafter_profile": "ed4",
+        "collector_profiles": ["ed2", "ed3", "ed5"]
+    }
 }
 
 class BodCyclerGUI(threading.Thread):
@@ -104,6 +108,9 @@ class BodCyclerGUI(threading.Thread):
         if "cycle_type" not in self.config: self.config["cycle_type"] = "Tailor"
         if "trade" not in self.config: self.config["trade"] = {"target_trades": 2, "buy_cloth_amount": 80, "buy_cloth_enabled": True}
         if "buy_cloth_enabled" not in self.config["trade"]: self.config["trade"]["buy_cloth_enabled"] = True
+        if "bots" not in self.config: self.config["bots"] = {"crafter_profile": "ed4", "collector_profiles": ["ed2", "ed3", "ed5"]}
+        if "crafter_profile" not in self.config["bots"]: self.config["bots"]["crafter_profile"] = "ed4"
+        if "collector_profiles" not in self.config["bots"]: self.config["bots"]["collector_profiles"] = ["ed2", "ed3", "ed5"]
 
     def save_config(self):
         for name, var in self.vars.items():
@@ -124,6 +131,11 @@ class BodCyclerGUI(threading.Thread):
             except ValueError: pass
         if "buy_cloth_enabled" in self.vars:
             self.config["trade"]["buy_cloth_enabled"] = bool(self.vars["buy_cloth_enabled"].get())
+        if "crafter_profile" in self.vars:
+            self.config.setdefault("bots", {})["crafter_profile"] = self.vars["crafter_profile"].get().strip()
+        if "collector_profiles" in self.vars:
+            raw = self.vars["collector_profiles"].get()
+            self.config.setdefault("bots", {})["collector_profiles"] = [p.strip() for p in raw.split(",") if p.strip()]
 
         try:
             with open(CONFIG_FILE, "w") as f:
@@ -190,6 +202,25 @@ class BodCyclerGUI(threading.Thread):
         self.set_global_status("Running (Assembling)")
         ClientPrintEx(Self(), 1, 1, "Assembling Large BODs...")
         threading.Thread(target=BodCycler_Assembler.run_assembler, daemon=True).start()
+
+    def trigger_take_bods(self):
+        self.save_config()
+        self.set_global_status("Running (BOD Collection)")
+        ClientPrintEx(Self(), 1, 1, "Starting BOD Collection round...")
+        threading.Thread(target=self._take_bods_thread, daemon=True).start()
+
+    def _take_bods_thread(self):
+        try:
+            AddToSystemJournal("Manual BOD Collection: walking to standby (892, 537)...")
+            newMoveXY(892, 537, False, 1, True)
+            time.sleep(2)
+            Disconnect()
+            BodCycler_TakeBods.run_take_bods_cycle()
+            AddToSystemJournal("Manual BOD Collection complete.")
+            self.set_global_status("Idle")
+        except Exception as e:
+            AddToSystemJournal(f"BOD Collection error: {e}")
+            self.set_global_status("Error (See Journal)")
 
     # --- Navigation Helpers ---
     def test_travel(self, rune_key_name):
@@ -299,17 +330,17 @@ class BodCyclerGUI(threading.Thread):
         AddToSystemJournal("=== MASTER CYCLE INITIATED ===")
         while not self._is_stopped():
             try:
-                # STEP 1: Craft Items & Fill BODs
-                if self._is_stopped(): break
-                self.set_global_status("Running (Crafting)")
-                ClientPrintEx(Self(), 1, 1, "Master: Filling BODs...")
-                BodCycler_Crafting.run_crafting_cycle()
-
-                # STEP 2: Check Supplies & Maintain Tools
+                # STEP 1: Check Supplies & Maintain Tools (must run before crafting)
                 if self._is_stopped(): break
                 self.set_global_status("Running (Supplies)")
                 ClientPrintEx(Self(), 1, 1, "Master: Checking Supplies...")
                 BodCycler_CheckSupplies.check_supplies()
+
+                # STEP 2: Craft Items & Fill BODs
+                if self._is_stopped(): break
+                self.set_global_status("Running (Crafting)")
+                ClientPrintEx(Self(), 1, 1, "Master: Filling BODs...")
+                BodCycler_Crafting.run_crafting_cycle()
 
                 # STEP 2.2: BOD Collection (if window is open)
                 if self._is_stopped(): break
@@ -540,6 +571,27 @@ class BodCyclerGUI(threading.Thread):
             Button(lf_runes, text="Go", width=2, command=lambda k=key: self.test_travel(k)).grid(row=r_row, column=r_col+2)
             r_col += 3
             if r_col > 5: r_col=0; r_row+=1
+
+        # 3.5. BOD Collection Profiles
+        lf_bots = LabelFrame(self.root, text="BOD Collection Profiles", padx=5, pady=5)
+        lf_bots.pack(fill="x", padx=10, pady=5)
+
+        bots_cfg = self.config.get("bots", {})
+        f_crafter = Frame(lf_bots)
+        f_crafter.pack(fill="x", pady=2)
+        Label(f_crafter, text="Crafter:", width=12, anchor="w").pack(side=LEFT)
+        self.vars["crafter_profile"] = StringVar(value=bots_cfg.get("crafter_profile", "ed4"))
+        Entry(f_crafter, textvariable=self.vars["crafter_profile"], width=20).pack(side=LEFT, padx=5)
+
+        f_collectors = Frame(lf_bots)
+        f_collectors.pack(fill="x", pady=2)
+        Label(f_collectors, text="Collectors:", width=12, anchor="w").pack(side=LEFT)
+        collectors_str = ", ".join(bots_cfg.get("collector_profiles", ["ed2", "ed3", "ed5"]))
+        self.vars["collector_profiles"] = StringVar(value=collectors_str)
+        Entry(f_collectors, textvariable=self.vars["collector_profiles"], width=20).pack(side=LEFT, padx=5)
+
+        Button(lf_bots, text="Take BODs Now", command=self.trigger_take_bods,
+               bg="#87CEEB", font=("Arial", 9, "bold"), width=16).pack(pady=(4, 2))
 
         # 4. Dashboard (Stats & Info)
         lf_stats = LabelFrame(self.root, text="Live Stats Dashboard", padx=5, pady=5)
