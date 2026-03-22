@@ -12,7 +12,7 @@ except ImportError:
 from BodCycler_Utils import (
     CONFIG_FILE, STATS_FILE, INVENTORY_FILE, SUPPLY_FILE,
     BOD_TYPE, BOD_BOOK_TYPE, BOOK_GUMP_ID, NEXT_PAGE_BTN,
-    load_config, check_abort, close_all_gumps,
+    load_config, check_abort, close_all_gumps, get_inventory_file,
     wait_for_gump, wait_for_gump_serial_change,
     read_stats, write_stats, set_status,
     _INV_LOCK
@@ -20,48 +20,47 @@ from BodCycler_Utils import (
 
 COMBINE_BTN = 2
 
-def append_to_inventory(bod_obj):
+def append_to_inventory(bod_obj, conserva_serial):
     """
-    Appends a new BOD to the inventory JSON, tracking its exact server array position.
-    This can be called natively by the Crafting script when it deposits a prized Small BOD.
+    Appends a new BOD to the per-book inventory JSON.
+    conserva_serial identifies which Conserva book's file to write to.
     """
+    inv_file = get_inventory_file(conserva_serial)
     with _INV_LOCK:
-        if not os.path.exists(INVENTORY_FILE):
+        if not os.path.exists(inv_file):
             AddToSystemJournal("State Management: Inventory JSON not found. Run a manual Conserva Scan first!")
             return
 
         try:
-            with open(INVENTORY_FILE, "r") as f:
+            with open(inv_file, "r") as f:
                 inventory = json.load(f)
         except Exception as e:
             AddToSystemJournal(f"State Management Error reading inventory: {e}")
             return
 
-        # Find the current highest position in the book
         max_pos = -1
         for b in inventory:
             if b.get('pos', -1) > max_pos:
                 max_pos = b['pos']
 
-        # Calculate the exact Drop Button ID and Page based on the new appended position
         bod_obj['pos'] = max_pos + 1
         bod_obj['drop_btn'] = 5 + (bod_obj['pos'] * 2)
         bod_obj['page'] = (bod_obj['pos'] // 10) + 1
 
         inventory.append(bod_obj)
 
-        tmp = INVENTORY_FILE + ".tmp"
+        tmp = inv_file + ".tmp"
         try:
             with open(tmp, "w") as f:
                 json.dump(inventory, f, indent=4)
-            os.replace(tmp, INVENTORY_FILE)
+            os.replace(tmp, inv_file)
             item_name = bod_obj.get('item', bod_obj.get('category', 'BOD')).title()
             mat_name = bod_obj.get('material', '')
             AddToSystemJournal(f"State Management: Added {mat_name} {item_name} to Pos #{bod_obj['pos']}")
         except Exception as e:
             AddToSystemJournal(f"State Management Error: Failed to write to JSON — {e}")
 
-def reindex_inventory():
+def reindex_inventory(conserva_serial):
     """Re-calculates pos, drop_btn, and page for every entry in the inventory JSON.
 
     Entries are sorted by their current pos value to preserve relative order,
@@ -72,13 +71,14 @@ def reindex_inventory():
         drop_btn = 5 + (pos * 2)
         page     = (pos // 10) + 1
     """
+    inv_file = get_inventory_file(conserva_serial)
     with _INV_LOCK:
-        if not os.path.exists(INVENTORY_FILE):
+        if not os.path.exists(inv_file):
             AddToSystemJournal("Reindex Error: Inventory JSON not found.")
             return False
 
         try:
-            with open(INVENTORY_FILE, "r") as f:
+            with open(inv_file, "r") as f:
                 inventory = json.load(f)
         except Exception as e:
             AddToSystemJournal(f"Reindex Error reading inventory: {e}")
@@ -91,11 +91,11 @@ def reindex_inventory():
             bod['drop_btn'] = 5 + (new_pos * 2)
             bod['page']     = (new_pos // 10) + 1
 
-        tmp = INVENTORY_FILE + ".tmp"
+        tmp = inv_file + ".tmp"
         try:
             with open(tmp, "w") as f:
                 json.dump(inventory, f, indent=4)
-            os.replace(tmp, INVENTORY_FILE)
+            os.replace(tmp, inv_file)
             AddToSystemJournal(f"Reindex complete: {len(inventory)} BODs renumbered (pos 0–{len(inventory)-1}).")
             return True
         except Exception as e:
@@ -277,17 +277,18 @@ def extract_bods(book_serial, target_bods, inventory=None):
                 extracted_pos = bod['pos']
                 inventory[:] = [b for b in inventory if b.get('pos') != extracted_pos]
                 with _INV_LOCK:
-                    tmp = INVENTORY_FILE + '.tmp'
+                    inv_file = get_inventory_file(book_serial)
+                    tmp = inv_file + '.tmp'
                     try:
                         with open(tmp, 'w') as f:
                             json.dump(inventory, f, indent=4)
-                        os.replace(tmp, INVENTORY_FILE)
+                        os.replace(tmp, inv_file)
                     except Exception as e:
                         AddToSystemJournal(f"State Management Error: save after extraction failed — {e}")
                 # Full reindex: loads the stripped file, renumbers 0..N-1, saves.
-                if reindex_inventory():
+                if reindex_inventory(book_serial):
                     try:
-                        with open(INVENTORY_FILE, 'r') as f:
+                        with open(get_inventory_file(book_serial), 'r') as f:
                             inventory[:] = json.load(f)
                     except Exception:
                         pass
@@ -371,12 +372,13 @@ def run_assembler():
     conserva = config.get("books", {}).get("Conserva", 0)
     if not conserva: return 0
 
-    if not os.path.exists(INVENTORY_FILE):
+    inv_file = get_inventory_file(conserva)
+    if not os.path.exists(inv_file):
         AddToSystemJournal("Assembler Error: Inventory JSON not found. Please run a manual Scan first.")
         return 0
 
     # 1. Load the Live Inventory State
-    with open(INVENTORY_FILE, "r") as f:
+    with open(inv_file, "r") as f:
         try:
             inventory = json.load(f)
         except Exception:

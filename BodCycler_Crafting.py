@@ -12,7 +12,7 @@ if script_dir not in sys.path:
 
 # Import external modules
 from bod_data import categorize_items, get_prize_number
-from bod_crafting_data import TAILOR_ITEMS, MATERIAL_MAP
+from bod_crafting_data import TAILOR_ITEMS, SMITH_ITEMS, MATERIAL_MAP
 import BodCycler_Item_Verification as Verifier
 import BodCycler_AI_Debugger
 import BodCycler_Assembler
@@ -25,7 +25,7 @@ except ImportError:
 
 from BodCycler_Utils import (
     CONFIG_FILE, STATS_FILE, BOD_TYPE, BOD_BOOK_TYPE, BOOK_GUMP_ID,
-    load_config, check_abort, close_all_gumps, wait_for_gump
+    load_config, check_abort, close_all_gumps, wait_for_gump, is_prize_enabled
 )
 
 # --- Config ---
@@ -233,25 +233,33 @@ def extract_bod_from_origine(origine_serial, bbcrate=0, cycle_type="Tailor"):
     return 0
 
 
-def parse_bod(bod_serial):
-    tooltip = GetTooltip(bod_serial).lower()
+def parse_bod(bod_serial, cycle_type="Tailor"):
+    tooltip = GetTooltip(bod_serial)
+    if not tooltip or len(tooltip) < 10:
+        # Tooltip not yet cached — force a client fetch then retry once
+        ClickOnObject(bod_serial)
+        Wait(400)
+        tooltip = GetTooltip(bod_serial)
+    tooltip = tooltip.lower()
     lines = [line.strip() for line in tooltip.split('|') if line.strip()]
-    
+
     is_large = "large" in tooltip
     is_except = "exceptional" in tooltip
-    
+
     qty_total = 0
     qty_finished = 0
     item_name = "unknown"
-    
+
+    items_dict = SMITH_ITEMS if cycle_type == "Smith" else TAILOR_ITEMS
+
     # 1. Find the Item Name using dict
-    sorted_keys = sorted(TAILOR_ITEMS.keys(), key=len, reverse=True)
+    sorted_keys = sorted(items_dict.keys(), key=len, reverse=True)
     for line in lines:
         for key in sorted_keys:
             if key in line:
                 item_name = key
                 break
-        if item_name != "unknown": 
+        if item_name != "unknown":
             break
 
     # 2. Extract Numbers
@@ -283,20 +291,22 @@ def parse_bod(bod_serial):
     # Step 3b: If no specific color is requested, fall back to our dictionary's base material
     if mat == "unknown":
         # Use explicit base material from dictionary if provided (Index 4)
-        if item_name in TAILOR_ITEMS and len(TAILOR_ITEMS[item_name]) >= 5:
-            mat = TAILOR_ITEMS[item_name][4]
-            
+        if item_name in items_dict and len(items_dict[item_name]) >= 5:
+            mat = items_dict[item_name][4]
+
         # Step 3c: Fallback to smart parsing if the dictionary isn't updated yet
         else:
-            if item_name in TAILOR_ITEMS:
-                item_cat = TAILOR_ITEMS[item_name][0]
-                if "leather" in item_name or "studded" in item_name or item_cat == "Footwear": 
+            if cycle_type == "Smith":
+                mat = "iron"
+            elif item_name in items_dict:
+                item_cat = items_dict[item_name][0]
+                if "leather" in item_name or "studded" in item_name or item_cat == "Footwear":
                     mat = "leather"
-                elif "bone" in item_name: 
+                elif "bone" in item_name:
                     mat = "bone"
-                else: 
+                else:
                     mat = "cloth"
-            else: 
+            else:
                 mat = "iron"
             
     cat = categorize_items(item_name) if item_name != "unknown" else "Small Bods"
@@ -349,39 +359,47 @@ def count_valid_backpack_items(item_id, is_except):
     return count
 
 
-def get_craft_info(item_name):
+def get_craft_info(item_name, cycle_type="Tailor"):
     """Retrieves Crafting parameters, supporting both String names and exact Button IDs."""
     item_lower = item_name.lower()
-    if item_lower in TAILOR_ITEMS:
-        data = TAILOR_ITEMS[item_lower]
+    items_dict = SMITH_ITEMS if cycle_type == "Smith" else TAILOR_ITEMS
+    tool_type  = 0x0FBC if cycle_type == "Smith" else 0x0F9D  # Tongs vs Sewing Kit
+    if item_lower in items_dict:
+        data = items_dict[item_lower]
+        if data[0] == 0 or data[1] == 0:
+            return None, None, None, None, None  # placeholder — item_btn not yet mapped
         return (
-            data[0], # Category (Text OR Button ID)
-            data[1], # Item (Text OR Button ID)
-            data[2], # Graphic ID
-            0x0F9D,  # Tool Type
-            data[3]  # Resource Cost
+            data[0],    # Category (Text OR Button ID)
+            data[1],    # Item (Text OR Button ID)
+            data[2],    # Graphic ID
+            tool_type,  # Tool Type
+            data[3]     # Resource Cost
         )
     return None, None, None, None, None
 
 
-def check_and_pull_materials(material, qty_to_craft, item_cost, crate_serial):
-    if material not in MATERIAL_MAP: 
+def check_and_pull_materials(material, qty_to_craft, item_cost, crate_serial, cycle_type="Tailor"):
+    if material not in MATERIAL_MAP:
         return False
-        
-    mat_info = MATERIAL_MAP[material]
-    mat_types = mat_info["types"]
+
+    mat_info  = MATERIAL_MAP[material]
+    mat_types = list(mat_info["types"])
     mat_color = mat_info["color"]
-    
-    if mat_color == -1: 
+    if mat_color == -1:
         mat_color = 0xFFFF
-    
+
     required_units = int((qty_to_craft * item_cost) * 1.2)
-    bp_qty = 0
-    for t in mat_types:
+    pull_buffer    = required_units + (140 if cycle_type == "Smith" else 40)
+
+    def _bp_count(t):
         FindTypeEx(t, mat_color, Backpack(), False)
-        bp_qty += FindFullQuantity()
-        
-    if bp_qty >= required_units:
+        return FindFullQuantity()
+
+    def _combined_bp():
+        return sum(_bp_count(t) for t in mat_types)
+
+    # Fast path: backpack already has enough (single or combined)
+    if _combined_bp() >= required_units:
         return True
 
     if crate_serial == 0:
@@ -389,38 +407,38 @@ def check_and_pull_materials(material, qty_to_craft, item_cost, crate_serial):
         return False
 
     AddToSystemJournal(f"Pulling {material} from crate...")
-    if crate_serial != 0:
-        UseObject(crate_serial)
-        Wait(1000)
-    
+    UseObject(crate_serial)
+    Wait(1000)
+
+    # For multi-type materials (e.g. cloth 0x1766/0x1767): sort so the type
+    # with the most combined availability goes first, then check the combined
+    # backpack total after every pull.  This keeps a single type in the backpack
+    # when possible and avoids pulling from both when one alone is sufficient.
+    if len(mat_types) > 1:
+        def _available(t):
+            FindTypeEx(t, mat_color, crate_serial, False)
+            return _bp_count(t) + FindFullQuantity()
+        mat_types.sort(key=_available, reverse=True)
+
     for t in mat_types:
-        if check_abort(): 
+        if check_abort():
             return False
-            
+
         FindTypeEx(t, mat_color, crate_serial, False)
-        found_stacks = GetFoundList()
-        
-        for stack in found_stacks:
-            if check_abort(): 
+        for stack in list(GetFoundList()):
+            if check_abort():
                 return False
-                
             world_save_guard()
-            FindTypeEx(t, mat_color, Backpack(), False)
-            current_bp_qty = FindFullQuantity()
-            
-            if current_bp_qty >= required_units: 
+            if _combined_bp() >= required_units:
                 return True
-                
-            amount_needed_now = required_units - current_bp_qty
-            pull_amt = required_units + 40
-            MoveItem(stack, pull_amt, Backpack(), 0, 0, 0)
+            MoveItem(stack, pull_buffer, Backpack(), 0, 0, 0)
             Wait(1200)
-            
-    total_bp = 0
-    for t in mat_types:
-        FindTypeEx(t, mat_color, Backpack(), False)
-        total_bp += FindFullQuantity()
-    if total_bp >= required_units:
+
+        # After exhausting this type's stacks, check combined before moving on
+        if _combined_bp() >= required_units:
+            return True
+
+    if _combined_bp() >= required_units:
         return True
 
     AddToSystemJournal(f"CRITICAL: Out of {material} in Crate!")
@@ -654,6 +672,8 @@ def fill_bod_completely(bod_serial, item_id, qty_to_fill, item_name, is_except):
         Wait(600)
         
     close_all_gumps()
+    ClickOnObject(bod_serial)
+    Wait(500)
     return is_bod_full(bod_serial, item_name)
 
 
@@ -712,15 +732,19 @@ def run_crafting_cycle():
                 bod, origine = result       # swap: bod=0, origine=new book serial
                 if origine == 0:
                     break                   # no replacement book found
-                # Persist the new Origine serial so subsequent cycles open the correct book
+                # Persist the new Origine serial so subsequent cycles open the correct book.
+                # Update both the runtime alias (books) AND the mode-specific source
+                # (books_tailor / books_smith) so a re-sync by the GUI never reverts it.
                 try:
                     cfg = load_config() or {}
+                    active_key = 'books_smith' if cycle_type == 'Smith' else 'books_tailor'
                     cfg.setdefault('books', {})['Origine'] = origine
+                    cfg.setdefault(active_key, {})['Origine'] = origine
                     tmp = CONFIG_FILE + '.tmp'
                     with open(tmp, 'w') as f:
                         json.dump(cfg, f, indent=4)
                     os.replace(tmp, CONFIG_FILE)
-                    AddToSystemJournal(f"Config: Origine updated to {hex(origine)}")
+                    AddToSystemJournal(f"Config: Origine ({active_key}) updated to {hex(origine)}")
                 except Exception as e:
                     AddToSystemJournal(f"Config: Failed to persist new Origine serial — {e}")
                 continue                    # retry with new Origine
@@ -729,17 +753,17 @@ def run_crafting_cycle():
             else:
                 bod = result
             
-        info = parse_bod(bod)
+        info = parse_bod(bod, cycle_type)
         
         if info['qty_needed'] <= 0:
             # BOD is already filled — still counts as a processed BOD for the cycle.
             session_crafted += 1
-            dest = conserva if (info['prize_id'] and info['prize_id'] > 0) else consegna
+            dest = conserva if is_prize_enabled(info['prize_id'], config) else consegna
             _small = 0
             if dest == conserva and not info['is_large']:
                 session_small += 1
                 _small = 1
-                BodCycler_Assembler.append_to_inventory({"type": "Small", "category": info['cat'], "item": info['item_name'], "material": info['material'].title(), "quality": "Exceptional" if info['is_except'] else "Normal", "amount": info['qty_total']})
+                BodCycler_Assembler.append_to_inventory({"type": "Small", "category": info['cat'], "item": info['item_name'], "material": info['material'].title(), "quality": "Exceptional" if info['is_except'] else "Normal", "amount": info['qty_total']}, conserva)
                 AddToSystemJournal(f"[Conserva] {info['item_name']} {info['material']} x{info['qty_total']} → prize #{info['prize_id']}")
             MoveItem(bod, 0, dest, 0, 0, 0)
             Wait(1000)
@@ -749,20 +773,21 @@ def run_crafting_cycle():
 
         BONE_ITEM_NAMES = {"bone helmet", "bone gloves", "bone arms", "bone leggings", "bone armor"}
         if info['material'] == "bone" or info['is_large'] or info['item_name'] in BONE_ITEM_NAMES:
-            dest = conserva if (info['prize_id'] and info['prize_id'] > 0) else scartare
+            dest = conserva if is_prize_enabled(info['prize_id'], config) else scartare
             if dest == conserva and not info['is_large']:
                 session_small += 1
-                BodCycler_Assembler.append_to_inventory({"type": "Small", "category": info['cat'], "item": info['item_name'], "material": info['material'].title(), "quality": "Exceptional" if info['is_except'] else "Normal", "amount": info['qty_total']})
+                BodCycler_Assembler.append_to_inventory({"type": "Small", "category": info['cat'], "item": info['item_name'], "material": info['material'].title(), "quality": "Exceptional" if info['is_except'] else "Normal", "amount": info['qty_total']}, conserva)
                 AddToSystemJournal(f"[Conserva] {info['item_name']} {info['material']} x{info['qty_total']} → prize #{info['prize_id']}")
             MoveItem(bod, 0, dest, 0, 0, 0)
             Wait(1000)
             close_all_gumps()
             continue
 
-        cat_identifier, item_identifier, item_id, tool_type, item_cost = get_craft_info(info['item_name'])
+        cat_identifier, item_identifier, item_id, tool_type, item_cost = get_craft_info(info['item_name'], cycle_type)
         
-        if cat_identifier is None: 
-            MoveItem(bod, 0, scartare, 0, 0, 0)
+        if cat_identifier is None:
+            AddToSystemJournal(f"[Riprova] {info['item_name']} — not in craft dictionary. Manual review needed.")
+            MoveItem(bod, 0, riprova, 0, 0, 0)
             Wait(1000)
             close_all_gumps()
             continue
@@ -771,20 +796,20 @@ def run_crafting_cycle():
         to_make = info['qty_needed'] - in_bag
         
         if to_make > 0:
-            if not check_and_pull_materials(info['material'], to_make, item_cost, crate):
+            if not check_and_pull_materials(info['material'], to_make, item_cost, crate, cycle_type):
                 AddToSystemJournal(f"[Riprova] {info['item_name']} ({info['material']}) — insufficient materials.")
                 MoveItem(bod, 0, riprova, 0, 0, 0)
                 Wait(1000)
                 close_all_gumps()
                 continue
-                
+
             mat_btn = MATERIAL_MAP[info['material']]['btn']
             success = craft_items_until_done(bod, tool_type, cat_identifier, item_identifier, info['item_name'], item_id, info['qty_needed'], info['is_except'], mat_btn)
             close_all_gumps()
-            
+
             if not success:
                 # Check if resources are still available — if so, retry once (likely input lag)
-                has_resources = check_and_pull_materials(info['material'], to_make, item_cost, crate)
+                has_resources = check_and_pull_materials(info['material'], to_make, item_cost, crate, cycle_type)
                 if has_resources:
                     AddToSystemJournal(f"Crafting failed but resources available — retrying {info['item_name']}...")
                     success = craft_items_until_done(bod, tool_type, cat_identifier, item_identifier, info['item_name'], item_id, info['qty_needed'], info['is_except'], mat_btn)
@@ -813,25 +838,35 @@ def run_crafting_cycle():
         if is_full:
             session_crafted += 1
             _crafted = 1
-            dest = conserva if (info['prize_id'] and info['prize_id'] > 0) else consegna
+            dest = conserva if is_prize_enabled(info['prize_id'], config) else consegna
             if dest == conserva and not info['is_large']:
                 session_small += 1
                 _small = 1
-                BodCycler_Assembler.append_to_inventory({"type": "Small", "category": info['cat'], "item": info['item_name'], "material": info['material'].title(), "quality": "Exceptional" if info['is_except'] else "Normal", "amount": info['qty_total']})
+                BodCycler_Assembler.append_to_inventory({"type": "Small", "category": info['cat'], "item": info['item_name'], "material": info['material'].title(), "quality": "Exceptional" if info['is_except'] else "Normal", "amount": info['qty_total']}, conserva)
                 AddToSystemJournal(f"[Conserva] {info['item_name']} {info['material']} x{info['qty_total']} → prize #{info['prize_id']}")
         else:
-            # BOD fill failed — retry once in case it was a gump lag/timing issue
-            AddToSystemJournal(f"BOD fill failed for {info['item_name']} — retrying once...")
-            is_full = fill_bod_completely(bod, item_id, info['qty_needed'], info['item_name'], info['is_except'])
+            # BOD fill returned False — check if items were already consumed (tooltip was empty/stale)
+            FindType(item_id, Backpack())
+            items_remain = FindCount() > 0
+            if not items_remain:
+                # Items consumed but tooltip was cleared — force refresh and recheck
+                AddToSystemJournal(f"BOD fill returned False but items consumed — refreshing tooltip for {info['item_name']}...")
+                ClickOnObject(bod)
+                Wait(600)
+                is_full = is_bod_full(bod, info['item_name'])
+            else:
+                # Items still in backpack — genuine fill failure, retry once
+                AddToSystemJournal(f"BOD fill failed for {info['item_name']} — retrying once...")
+                is_full = fill_bod_completely(bod, item_id, info['qty_needed'], info['item_name'], info['is_except'])
             close_all_gumps()
             if is_full:
                 session_crafted += 1
                 _crafted = 1
-                dest = conserva if (info['prize_id'] and info['prize_id'] > 0) else consegna
+                dest = conserva if is_prize_enabled(info['prize_id'], config) else consegna
                 if dest == conserva and not info['is_large']:
                     session_small += 1
                     _small = 1
-                    BodCycler_Assembler.append_to_inventory({"type": "Small", "category": info['cat'], "item": info['item_name'], "material": info['material'].title(), "quality": "Exceptional" if info['is_except'] else "Normal", "amount": info['qty_total']})
+                    BodCycler_Assembler.append_to_inventory({"type": "Small", "category": info['cat'], "item": info['item_name'], "material": info['material'].title(), "quality": "Exceptional" if info['is_except'] else "Normal", "amount": info['qty_total']}, conserva)
                     AddToSystemJournal(f"[Conserva] {info['item_name']} {info['material']} x{info['qty_total']} → prize #{info['prize_id']}")
             else:
                 # Retry also failed — send to Riprova

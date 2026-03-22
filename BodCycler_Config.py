@@ -7,7 +7,7 @@ import time
 import BodCycler_AI_Debugger
 from tkinter import *
 from datetime import datetime
-from BodCycler_Utils import set_status, read_stats, write_stats, save_performance_snapshot
+from BodCycler_Utils import set_status, read_stats, write_stats, save_performance_snapshot, get_inventory_file, load_config
 
 # Import the logic modules
 try:
@@ -65,6 +65,16 @@ DEFAULT_CONFIG = {
     "books": {
         "Origine": 0,   "Conserva": 0,  "Riprova": 0,   "Consegna": 0,  "Scartare": 0
     },
+    "books_tailor": {
+        "Origine": 0,   "Conserva": 0,  "Riprova": 0,   "Consegna": 0,  "Scartare": 0
+    },
+    "books_smith": {
+        "Origine": 0,   "Conserva": 0,  "Riprova": 0,   "Consegna": 0,  "Scartare": 0
+    },
+    "talismans": {
+        "Tailor": 0,
+        "Smith":  0
+    },
     "containers": {
         "MaterialCrate": 0, "TrashBarrel": 0, "ClothDyeTub": 0, "RewardCrate": 0, "BodBookCrate": 0
     },
@@ -79,6 +89,10 @@ DEFAULT_CONFIG = {
     "bots": {
         "crafter_profile": "ed4",
         "collector_profiles": ["ed2", "ed3", "ed5"]
+    },
+    "prize_filter": {
+        "tailor": [23, 24],
+        "smith": [12, 17, 19, 20, 21, 22]
     }
 }
 
@@ -108,6 +122,13 @@ class BodCyclerGUI(threading.Thread):
         if "cycle_type" not in self.config: self.config["cycle_type"] = "Tailor"
         if "trade" not in self.config: self.config["trade"] = {"target_trades": 2, "buy_cloth_amount": 80, "buy_cloth_enabled": True}
         if "buy_cloth_enabled" not in self.config["trade"]: self.config["trade"]["buy_cloth_enabled"] = True
+        # Migrate legacy single 'books' dict into books_tailor if not yet split
+        if "books_tailor" not in self.config:
+            self.config["books_tailor"] = dict(self.config.get("books", copy.deepcopy(DEFAULT_CONFIG["books_tailor"])))
+        if "books_smith" not in self.config:
+            self.config["books_smith"] = copy.deepcopy(DEFAULT_CONFIG["books_smith"])
+        if "talismans" not in self.config:
+            self.config["talismans"] = copy.deepcopy(DEFAULT_CONFIG["talismans"])
         if "bots" not in self.config: self.config["bots"] = {"crafter_profile": "ed4", "collector_profiles": ["ed2", "ed3", "ed5"]}
         if "crafter_profile" not in self.config["bots"]: self.config["bots"]["crafter_profile"] = "ed4"
         if "collector_profiles" not in self.config["bots"]: self.config["bots"]["collector_profiles"] = ["ed2", "ed3", "ed5"]
@@ -137,6 +158,11 @@ class BodCyclerGUI(threading.Thread):
             raw = self.vars["collector_profiles"].get()
             self.config.setdefault("bots", {})["collector_profiles"] = [p.strip() for p in raw.split(",") if p.strip()]
 
+        # Sync active 'books' from the correct per-mode sub-dict before writing
+        cycle = self.config.get("cycle_type", "Tailor")
+        active_key = "books_tailor" if cycle == "Tailor" else "books_smith"
+        self.config["books"] = dict(self.config.get(active_key, {}))
+
         try:
             with open(CONFIG_FILE, "w") as f:
                 json.dump(self.config, f, indent=4)
@@ -154,7 +180,9 @@ class BodCyclerGUI(threading.Thread):
         response = ClientTargetResponse()
         if response["ID"] > 0:
             serial = response["ID"]
-            if category == "books": self.config["books"][key] = serial
+            if category in ("books_tailor", "books_smith"): self.config[category][key] = serial
+            elif category == "talismans": self.config["talismans"][key] = serial
+            elif category == "books": self.config["books"][key] = serial
             elif category == "containers": self.config["containers"][key] = serial
             elif category == "travel": self.config["travel"][key] = serial
             
@@ -255,6 +283,14 @@ class BodCyclerGUI(threading.Thread):
                         res = data.get("resources", {})
                         
                         self.vars["sup_iron"].set(f"Iron: {res.get('Ingots', 0)}")
+                        self.vars["sup_dullcopper"].set(f"D.Copper: {res.get('DullCopper', 0)}")
+                        self.vars["sup_shadowiron"].set(f"Shadow: {res.get('ShadowIron', 0)}")
+                        self.vars["sup_copper"].set(f"Copper: {res.get('Copper', 0)}")
+                        self.vars["sup_bronze"].set(f"Bronze: {res.get('Bronze', 0)}")
+                        self.vars["sup_gold"].set(f"Gold: {res.get('Gold', 0)}")
+                        self.vars["sup_agapite"].set(f"Agapite: {res.get('Agapite', 0)}")
+                        self.vars["sup_verite"].set(f"Verite: {res.get('Verite', 0)}")
+                        self.vars["sup_valorite"].set(f"Valorite: {res.get('Valorite', 0)}")
                         self.vars["sup_cloth"].set(f"Cloth: {res.get('Cloth', 0)}")
                         self.vars["sup_leather"].set(f"Leather: {res.get('Leather', 0)}")
                         self.vars["sup_spined"].set(f"Spined: {res.get('Spined', 0)}")
@@ -314,9 +350,14 @@ class BodCyclerGUI(threading.Thread):
 
     # --- ORCHESTRATION: The Master Loop ---
 
-    def set_global_status(self, status_text):
-        """Updates the GUI and writes status to the stats file for worker scripts to read."""
+    def set_global_status(self, status_text, force=False):
+        """Updates the GUI and writes status to the stats file for worker scripts to read.
+        Pass force=True when intentionally starting/stopping to bypass the stop guard."""
         with _STATS_LOCK:
+            # Never let a "Running" sub-step overwrite an explicit Stop signal.
+            # force=True bypasses this — used by start_cycling() to resume from Stopped.
+            if not force and STATS["status"] == "Stopped" and "Running" in status_text:
+                return
             STATS["status"] = status_text
         if self.root:
             self.root.after(0, lambda: self.vars["status"].set(f"Status: {status_text}"))
@@ -360,11 +401,14 @@ class BodCyclerGUI(threading.Thread):
                 if self._is_stopped(): break
 
                 try:
-                    if os.path.exists(INVENTORY_FILE):
+                    _cfg = load_config()
+                    _conserva = _cfg.get("books", {}).get("Conserva", 0)
+                    _inv_file = get_inventory_file(_conserva) if _conserva else None
+                    if _inv_file and os.path.exists(_inv_file):
                         self.set_global_status("Running (Assembly Check)")
                         ClientPrintEx(Self(), 1, 1, "Master: Checking local inventory for sets...")
 
-                        with open(INVENTORY_FILE, "r") as _f:
+                        with open(_inv_file, "r") as _f:
                             _inv = json.load(_f)
 
                         _sets = BodCycler_Assembler.find_completable_sets(_inv)
@@ -422,7 +466,7 @@ class BodCyclerGUI(threading.Thread):
                 return
             STATS["start_time"] = datetime.now()
 
-        self.set_global_status("Running")
+        self.set_global_status("Running", force=True)
         self.save_config()
         self.reset_stats()
 
@@ -438,201 +482,369 @@ class BodCyclerGUI(threading.Thread):
         AddToSystemJournal("User requested cycle stop. Safely aborting scripts...")
 
     def run(self):
+        from tkinter import ttk
         self.load_config()
         self.root = Tk()
-        self.root.title(f"{CharName()} - BOD Cycler Config")
-        self.root.geometry("480x980") 
-        self.root.resizable(False, False)
-        
+        self.root.title(f"{CharName()} — BOD Cycler")
+
+        BG = "#ECE9D8"
+        self.root.configure(bg=BG)
+        self.root.geometry("660x470")
+        self.root.minsize(580, 430)
+        self.root.resizable(True, True)
+
         try:
             if os.path.exists(ICON_FILE): self.root.iconbitmap(ICON_FILE)
-        except Exception: pass
+        except Exception:
+            pass
 
-        # 1. Logistics Frame
-        lf_log = LabelFrame(self.root, text="Logistics & Actions", padx=5, pady=5)
-        lf_log.pack(fill="x", padx=10, pady=5)
+        def _btn(parent, text, cmd, color=None, **kw):
+            props = dict(font=("Tahoma", 8), relief=RAISED, bd=2,
+                         bg=color or BG, activebackground=color or BG)
+            props.update(kw)
+            return Button(parent, text=text, command=cmd, **props)
 
-        # Mode row
-        f_type = Frame(lf_log)
-        f_type.pack(fill="x", pady=(5, 2))
+        def _lbl(parent, text="", textvariable=None, bold=False, **kw):
+            props = dict(bg=BG, fg="black", font=("Tahoma", 8, "bold") if bold else ("Tahoma", 8))
+            props.update(kw)
+            if textvariable:
+                return Label(parent, textvariable=textvariable, **props)
+            return Label(parent, text=text, **props)
+
+        # ── Status bar ────────────────────────────────────────────────
+        self.vars["status"] = StringVar(value="Status: Idle")
+        self.vars["timer"]  = StringVar(value="Time: 00:00:00")
+        f_status = Frame(self.root, bg="#003399", pady=4)
+        f_status.pack(fill="x")
+        Label(f_status, textvariable=self.vars["status"],
+              bg="#003399", fg="white", font=("Tahoma", 9, "bold")).pack(side=LEFT, padx=10)
+        Label(f_status, textvariable=self.vars["timer"],
+              bg="#003399", fg="#AADDFF", font=("Courier", 9)).pack(side=RIGHT, padx=10)
+
+        # ── Notebook ─────────────────────────────────────────────────
+        style = ttk.Style()
+        try:    style.theme_use("xpnative")
+        except Exception:
+            try: style.theme_use("winnative")
+            except Exception: pass
+        nb = ttk.Notebook(self.root)
+        nb.pack(fill="both", expand=True, padx=6, pady=(4, 2))
+
+        # ═══════════════════════════════════════════════
+        # TAB 1 — Actions
+        # ═══════════════════════════════════════════════
+        t1 = Frame(nb, bg=BG, padx=8, pady=6)
+        nb.add(t1, text=" Actions ")
+
+        # Mode + Trades/Cycle row
+        f_top = Frame(t1, bg=BG)
+        f_top.pack(fill="x", pady=(0, 3))
+        _lbl(f_top, "Mode:").pack(side=LEFT)
         self.vars["cycle_type"] = StringVar(value=self.config.get("cycle_type", "Tailor"))
-        Label(f_type, text="Mode:").pack(side=LEFT, padx=2)
-        Radiobutton(f_type, text="Tailor", variable=self.vars["cycle_type"], value="Tailor").pack(side=LEFT)
-        Radiobutton(f_type, text="Smith", variable=self.vars["cycle_type"], value="Smith").pack(side=LEFT)
+        for val in ("Tailor", "Smith"):
+            Radiobutton(f_top, text=val, variable=self.vars["cycle_type"], value=val,
+                        bg=BG, font=("Tahoma", 8)).pack(side=LEFT, padx=2)
+        _lbl(f_top, "   Trades/Cycle:").pack(side=LEFT)
+        self.vars["target_trades"] = StringVar(
+            value=str(self.config.get("trade", {}).get("target_trades", 2)))
+        Entry(f_top, textvariable=self.vars["target_trades"],
+              width=4, font=("Tahoma", 8)).pack(side=LEFT, padx=(3, 0))
 
-        # Action buttons row: [Trades/Cycle entry | Trade | Craft]  ...  [Scan | Assemble | Check Prizes]
-        f_actions = Frame(lf_log)
-        f_actions.pack(fill="x", pady=(0, 4))
+        # Action buttons row
+        f_act = Frame(t1, bg=BG)
+        f_act.pack(fill="x", pady=2)
+        _btn(f_act, "Trade",         self.trigger_trade,            "#90EE90").pack(side=LEFT, padx=2)
+        _btn(f_act, "Craft",         self.trigger_crafting,         "#FFD700").pack(side=LEFT, padx=2)
+        _btn(f_act, "Scan",          self.trigger_scan,             "#FFB6C1").pack(side=LEFT, padx=2)
+        _btn(f_act, "Assemble",      self.trigger_assemble,         "#DDA0DD").pack(side=LEFT, padx=2)
+        _btn(f_act, "Check Prizes",  self.check_assembly_readiness, "#B0E0E6").pack(side=LEFT, padx=2)
+        _btn(f_act, "Prize Filter…", self.open_prize_filter,        "#FFA07A").pack(side=LEFT, padx=2)
 
-        Label(f_actions, text="Trades/Cycle:").pack(side=LEFT, padx=(2, 1))
-        self.vars["target_trades"] = StringVar(value=str(self.config.get("trade", {}).get("target_trades", 2)))
-        Entry(f_actions, textvariable=self.vars["target_trades"], width=4).pack(side=LEFT, padx=(0, 4))
-        Button(f_actions, text="Trade", command=self.trigger_trade, bg="#90EE90").pack(side=LEFT, padx=1)
-        Button(f_actions, text="Craft", command=self.trigger_crafting, bg="#FFD700").pack(side=LEFT, padx=1)
+        # Buy Cloth row
+        f_cloth = Frame(t1, bg=BG)
+        f_cloth.pack(fill="x", pady=2)
+        _lbl(f_cloth, "Buy Cloth:").pack(side=LEFT)
+        self.vars["buy_cloth_enabled"] = BooleanVar(
+            value=bool(self.config.get("trade", {}).get("buy_cloth_enabled", True)))
+        for text, val in (("ON", True), ("OFF", False)):
+            Radiobutton(f_cloth, text=text, variable=self.vars["buy_cloth_enabled"], value=val,
+                        bg=BG, font=("Tahoma", 8)).pack(side=LEFT, padx=2)
+        self.vars["buy_cloth_amount"] = StringVar(
+            value=str(self.config.get("trade", {}).get("buy_cloth_amount", 80)))
+        Entry(f_cloth, textvariable=self.vars["buy_cloth_amount"],
+              width=5, font=("Tahoma", 8)).pack(side=LEFT, padx=(8, 0))
 
-        Button(f_actions, text="Check Prizes", command=self.check_assembly_readiness, bg="#B0E0E6", font=("Arial", 8)).pack(side=RIGHT, padx=1)
-        Button(f_actions, text="Assemble", command=self.trigger_assemble, bg="#DDA0DD").pack(side=RIGHT, padx=1)
-        Button(f_actions, text="Scan", command=self.trigger_scan, bg="#FFB6C1").pack(side=RIGHT, padx=1)
+        # Supplies panel
+        f_sup = Frame(t1, bg="#DDD8CC", relief=SUNKEN, bd=1)
+        f_sup.pack(fill="x", pady=(6, 2))
+        for col in range(3):
+            f_sup.columnconfigure(col, weight=1)
+        for k, v in [
+            ("sup_iron",       "Iron: 0"),
+            ("sup_cloth",      "Cloth: 0"),
+            ("sup_leather",    "Leather: 0"),
+            ("sup_dullcopper", "D.Copper: 0"),
+            ("sup_shadowiron", "Shadow: 0"),
+            ("sup_copper",     "Copper: 0"),
+            ("sup_bronze",     "Bronze: 0"),
+            ("sup_gold",       "Gold: 0"),
+            ("sup_agapite",    "Agapite: 0"),
+            ("sup_verite",     "Verite: 0"),
+            ("sup_valorite",   "Valorite: 0"),
+            ("sup_spined",     "Spined: 0"),
+            ("sup_horned",     "Horned: 0"),
+            ("sup_barbed",     "Barbed: 0"),
+        ]:
+            self.vars[k] = StringVar(value=v)
+        # Row 0: Iron | Cloth | Leather (bold totals)
+        for c, (k, fg) in enumerate([("sup_iron","#555555"),("sup_cloth","#222"),("sup_leather","#222")]):
+            Label(f_sup, textvariable=self.vars[k], bg="#DDD8CC",
+                  font=("Tahoma", 8, "bold"), fg=fg).grid(row=0, column=c, padx=10, pady=2)
+        # Rows 1-3: colored ores (3×3 grid)
+        for row_idx, row_items in enumerate([
+            [("sup_dullcopper","#777777"), ("sup_shadowiron","#333333"), ("sup_copper",  "#B87333")],
+            [("sup_bronze",    "#8B7355"), ("sup_gold",      "#B8860B"), ("sup_agapite", "#8B2500")],
+            [("sup_verite",    "#005500"), ("sup_valorite",  "#00008B")],
+        ], start=1):
+            for c, (k, fg) in enumerate(row_items):
+                Label(f_sup, textvariable=self.vars[k], bg="#DDD8CC",
+                      font=("Tahoma", 8), fg=fg).grid(row=row_idx, column=c, padx=10, pady=1)
+        # Row 4: leather grades — Spined=blue, Horned=dark red, Barbed=green (matches in-game)
+        for c, (k, fg) in enumerate([("sup_spined","#000066"),("sup_horned","#660000"),("sup_barbed","#004400")]):
+            Label(f_sup, textvariable=self.vars[k], bg="#DDD8CC",
+                  font=("Tahoma", 8), fg=fg).grid(row=4, column=c, padx=10, pady=1)
 
-        # Buy Cloth row: ON/OFF radio + quantity entry
-        f_trade_vars = Frame(lf_log)
-        f_trade_vars.pack(fill="x", pady=2)
+        # Live Stats section
+        lf_stats = LabelFrame(t1, text="Live Stats", bg=BG,
+                              font=("Tahoma", 8, "bold"), relief=GROOVE, bd=2)
+        lf_stats.pack(fill="x", pady=(6, 2))
+        self.vars["stat_crafted"] = StringVar(value="BODs Filled: 0")
+        self.vars["stat_small"]   = StringVar(value="Small Prizes: 0")
+        self.vars["stat_large"]   = StringVar(value="Large Prizes: 0")
+        self.vars["stat_prizes"]  = StringVar(value="Prizes: 0")
+        f_srow = Frame(lf_stats, bg=BG)
+        f_srow.pack(fill="x", pady=2)
+        for (k, c) in [("stat_crafted","darkblue"),("stat_small","darkgreen"),
+                       ("stat_large","darkmagenta"),("stat_prizes","darkorange")]:
+            Label(f_srow, textvariable=self.vars[k], fg=c,
+                  font=("Tahoma", 9, "bold"), bg=BG).pack(side=LEFT, expand=True)
+        f_sbtns = Frame(lf_stats, bg=BG)
+        f_sbtns.pack(pady=4)
+        _btn(f_sbtns, "Reset Stats", self.reset_stats).pack(side=LEFT, padx=4)
+        _btn(f_sbtns, "Save Report", save_performance_snapshot, "#C8E6C9").pack(side=LEFT, padx=4)
 
-        Label(f_trade_vars, text="Buy Cloth:").pack(side=LEFT, padx=(2, 2))
-        self.vars["buy_cloth_enabled"] = BooleanVar(value=bool(self.config.get("trade", {}).get("buy_cloth_enabled", True)))
-        Radiobutton(f_trade_vars, text="ON", variable=self.vars["buy_cloth_enabled"], value=True).pack(side=LEFT)
-        Radiobutton(f_trade_vars, text="OFF", variable=self.vars["buy_cloth_enabled"], value=False).pack(side=LEFT)
-        self.vars["buy_cloth_amount"] = StringVar(value=str(self.config.get("trade", {}).get("buy_cloth_amount", 80)))
-        Entry(f_trade_vars, textvariable=self.vars["buy_cloth_amount"], width=5).pack(side=LEFT, padx=(6, 2))
+        # ═══════════════════════════════════════════════
+        # TAB 2 — Books
+        # ═══════════════════════════════════════════════
+        t2 = Frame(nb, bg=BG, padx=8, pady=8)
+        nb.add(t2, text=" Books ")
 
-        f_supplies = Frame(lf_log, bg="#eef")
-        f_supplies.pack(fill="x", pady=5, padx=5)
-        
-        self.vars["sup_iron"] = StringVar(value="Iron: 0")
-        self.vars["sup_cloth"] = StringVar(value="Cloth: 0")
-        self.vars["sup_leather"] = StringVar(value="Leather: 0")
-        self.vars["sup_spined"] = StringVar(value="Spined: 0")
-        self.vars["sup_horned"] = StringVar(value="Horned: 0")
-        self.vars["sup_barbed"] = StringVar(value="Barbed: 0")
-        
-        Label(f_supplies, textvariable=self.vars["sup_iron"], bg="#eef", font=("Arial", 9, "bold")).grid(row=0, column=0, padx=10)
-        Label(f_supplies, textvariable=self.vars["sup_cloth"], bg="#eef", font=("Arial", 9, "bold")).grid(row=0, column=1, padx=10)
-        Label(f_supplies, textvariable=self.vars["sup_leather"], bg="#eef", font=("Arial", 9)).grid(row=0, column=2, padx=10)
-        Label(f_supplies, textvariable=self.vars["sup_spined"], bg="#eef", fg="#004400").grid(row=1, column=0, padx=10)
-        Label(f_supplies, textvariable=self.vars["sup_horned"], bg="#eef", fg="#440000").grid(row=1, column=1, padx=10)
-        Label(f_supplies, textvariable=self.vars["sup_barbed"], bg="#eef", fg="#000044").grid(row=1, column=2, padx=10)
+        for section_label, cat_key in [("Tailor Books", "books_tailor"), ("Smith Books", "books_smith")]:
+            Label(t2, text=f"── {section_label} ──", bg=BG,
+                  font=("Tahoma", 8, "bold"), fg="#555").pack(fill="x", pady=(8, 2))
+            for key in ["Origine", "Conserva", "Riprova", "Consegna", "Scartare"]:
+                s      = self.config.get(cat_key, {}).get(key, 0)
+                t_text = f"{key}: {hex(s)}" if s else f"{key}: Not Set"
+                fg_c   = "navy" if s else "red"
+                f_row  = Frame(t2, bg=BG)
+                f_row.pack(fill="x", pady=2)
+                lw = _lbl(f_row, t_text, fg=fg_c, width=24, anchor="w")
+                lw.pack(side=LEFT)
+                _btn(f_row, "Target",
+                     lambda k=key, c=cat_key, l=lw: self.get_target(c, k, l),
+                     width=8).pack(side=LEFT, padx=6)
 
-        targets = [
-            ("MaterialCrate", "Material Crate"),
-            ("TrashBarrel", "Trash Barrel"),
-            ("ClothDyeTub", "Cloth Dye Tub"),
-            ("RewardCrate", "Reward Crate"),
-            ("BodBookCrate", "BodBook Crate"),
-            ("RuneBook", "RuneBook")
+        # ═══════════════════════════════════════════════
+        # TAB 3 — Setup
+        # ═══════════════════════════════════════════════
+        t3 = Frame(nb, bg=BG, padx=8, pady=8)
+        nb.add(t3, text=" Setup ")
+
+        setup_targets = [
+            ("containers", "MaterialCrate",  "Material Crate"),
+            ("containers", "TrashBarrel",    "Trash Barrel"),
+            ("containers", "ClothDyeTub",    "Cloth Dye Tub"),
+            ("containers", "RewardCrate",    "Reward Crate"),
+            ("containers", "BodBookCrate",   "BodBook Crate"),
+            ("travel",     "RuneBook",       "Rune Book"),
         ]
-        
-        f_targets = Frame(lf_log)
-        f_targets.pack(fill="x")
-        
-        for i, (key, label) in enumerate(targets):
-            cat = "travel" if key == "RuneBook" else "containers"
-            s = self.config[cat].get(key, 0)
-            t = f"{label}: {hex(s)}" if s else f"{label}: Not Set"
-            c = "blue" if s else "red"
-            lbl = Label(f_targets, text=t, fg=c, width=25, anchor="w")
-            lbl.grid(row=i, column=0, padx=5, pady=2)
-            Button(f_targets, text="Target", width=8, 
-                   command=lambda k=key, c=cat, l=lbl: self.get_target(c, k, l)).grid(row=i, column=1, padx=5, pady=2)
+        for cat, key, label in setup_targets:
+            s      = self.config[cat].get(key, 0)
+            t_text = f"{label}: {hex(s)}" if s else f"{label}: Not Set"
+            fg_c   = "navy" if s else "red"
+            f_row  = Frame(t3, bg=BG)
+            f_row.pack(fill="x", pady=3)
+            lw = _lbl(f_row, t_text, fg=fg_c, width=24, anchor="w")
+            lw.pack(side=LEFT)
+            _btn(f_row, "Target",
+                 lambda k=key, ca=cat, l=lw: self.get_target(ca, k, l),
+                 width=8).pack(side=LEFT, padx=6)
 
-        hx = self.config["home"].get("X", 0)
-        spot_txt = f"Home: {hx}, ..." if hx != 0 else "Home: Not Set"
-        spot_fg = "blue" if hx != 0 else "red"
-        lbl_spot = Label(f_targets, text=spot_txt, fg=spot_fg, width=25, anchor="w")
-        
-        # --- FIX: Set the home items to automatically go to the row below the targets list ---
-        home_row = len(targets)
-        lbl_spot.grid(row=home_row, column=0, padx=5, pady=5)
-        
-        f_home_btns = Frame(f_targets)
-        f_home_btns.grid(row=home_row, column=1, padx=5, pady=5)
-        Button(f_home_btns, text="Set", width=4, command=lambda: self.set_home_spot(lbl_spot)).pack(side=LEFT, padx=1)
-        Button(f_home_btns, text="Go To", width=5, command=self.go_to_home_spot).pack(side=LEFT, padx=1)
+        # ── Talisman Swap ──────────────────────────────────────────────────────
+        Label(t3, text="── Talisman Swap ──", bg=BG,
+              font=("Tahoma", 8, "bold"), fg="#555").pack(fill="x", pady=(10, 2))
+        Label(t3, text="Keep BOTH talismans in backpack. Auto-equip fires on cycle start.",
+              bg=BG, font=("Tahoma", 7, "italic"), fg="#884400",
+              wraplength=220, justify="left").pack(fill="x", pady=(0, 4))
+        for mode in ("Tailor", "Smith"):
+            s      = self.config.get("talismans", {}).get(mode, 0)
+            t_text = f"{mode} Talisman: {hex(s)}" if s else f"{mode} Talisman: Not Set"
+            fg_c   = "navy" if s else "red"
+            f_row  = Frame(t3, bg=BG)
+            f_row.pack(fill="x", pady=2)
+            lw = _lbl(f_row, t_text, fg=fg_c, width=24, anchor="w")
+            lw.pack(side=LEFT)
+            _btn(f_row, "Target",
+                 lambda m=mode, l=lw: self.get_target("talismans", m, l),
+                 width=8).pack(side=LEFT, padx=6)
 
-        # 2. Books Frame
-        lf_books = LabelFrame(self.root, text="BOD Books", padx=5, pady=5)
-        lf_books.pack(fill="x", padx=10, pady=5)
-        book_keys = ["Origine", "Conserva", "Riprova", "Consegna", "Scartare"]
-        for i, key in enumerate(book_keys):
-            s = self.config["books"].get(key, 0)
-            t = f"{key}: {hex(s)}" if s else f"{key}: Not Set"
-            c = "blue" if s else "red"
-            lbl = Label(lf_books, text=t, fg=c, width=25, anchor="w")
-            lbl.grid(row=i, column=0, padx=5)
-            Button(lf_books, text="Target", width=8, 
-                   command=lambda k=key, l=lbl: self.get_target("books", k, l)).grid(row=i, column=1, padx=5)
+        hx       = self.config["home"].get("X", 0)
+        home_txt = f"Home: {hx}, ..." if hx != 0 else "Home: Not Set"
+        home_fg  = "navy" if hx != 0 else "red"
+        f_home   = Frame(t3, bg=BG)
+        f_home.pack(fill="x", pady=3)
+        lbl_spot = _lbl(f_home, home_txt, fg=home_fg, width=24, anchor="w")
+        lbl_spot.pack(side=LEFT)
+        _btn(f_home, "Set",   lambda: self.set_home_spot(lbl_spot), width=4).pack(side=LEFT, padx=2)
+        _btn(f_home, "Go To", self.go_to_home_spot, width=5).pack(side=LEFT, padx=2)
 
-        # 3. Runes Frame
-        lf_runes = LabelFrame(self.root, text="Travel", padx=5, pady=5)
-        lf_runes.pack(fill="x", padx=10, pady=5)
-        
-        f_method = Frame(lf_runes)
-        f_method.grid(row=0, column=0, columnspan=4)
+        # ═══════════════════════════════════════════════
+        # TAB 4 — Travel
+        # ═══════════════════════════════════════════════
+        t4 = Frame(nb, bg=BG, padx=8, pady=8)
+        nb.add(t4, text=" Travel ")
+
+        f_meth = Frame(t4, bg=BG)
+        f_meth.pack(fill="x", pady=(0, 8))
+        _lbl(f_meth, "Method:").pack(side=LEFT)
         self.vars["travel_method"] = StringVar(value=self.config["travel"].get("Method", "Recall"))
-        Radiobutton(f_method, text="Recall", variable=self.vars["travel_method"], value="Recall").pack(side=LEFT)
-        Radiobutton(f_method, text="Sacred Journey", variable=self.vars["travel_method"], value="SacredJourney").pack(side=LEFT)
+        for text, val in (("Recall", "Recall"), ("Sacred Journey", "SacredJourney")):
+            Radiobutton(f_meth, text=text, variable=self.vars["travel_method"], value=val,
+                        bg=BG, font=("Tahoma", 8)).pack(side=LEFT, padx=4)
 
+        f_runes = Frame(t4, bg=BG)
+        f_runes.pack()
         r_keys = ["WorkSpot1", "WorkSpot2", "Tailor1", "Tailor2", "Smith1", "Smith2"]
-        r_row, r_col = 1, 0
-        for key in r_keys:
-            Label(lf_runes, text=key).grid(row=r_row, column=r_col, padx=5)
+        for idx, key in enumerate(r_keys):
+            row_r, col_r = divmod(idx, 2)
+            f_r = Frame(f_runes, bg=BG)
+            f_r.grid(row=row_r, column=col_r, padx=12, pady=4, sticky="w")
+            _lbl(f_r, f"{key}:", width=10, anchor="w").pack(side=LEFT)
             var = StringVar(value=str(self.config["travel"]["Runes"].get(key, 1)))
             self.vars[f"rune_{key}"] = var
-            Entry(lf_runes, textvariable=var, width=3).grid(row=r_row, column=r_col+1)
-            Button(lf_runes, text="Go", width=2, command=lambda k=key: self.test_travel(k)).grid(row=r_row, column=r_col+2)
-            r_col += 3
-            if r_col > 5: r_col=0; r_row+=1
+            Entry(f_r, textvariable=var, width=3, font=("Tahoma", 8)).pack(side=LEFT, padx=3)
+            _btn(f_r, "Go", lambda k=key: self.test_travel(k), width=3).pack(side=LEFT, padx=2)
 
-        # 3.5. BOD Collection Profiles
-        lf_bots = LabelFrame(self.root, text="BOD Collection Profiles", padx=5, pady=5)
-        lf_bots.pack(fill="x", padx=10, pady=5)
+        # ═══════════════════════════════════════════════
+        # TAB 5 — Bots
+        # ═══════════════════════════════════════════════
+        t5 = Frame(nb, bg=BG, padx=8, pady=8)
+        nb.add(t5, text=" Bots ")
 
         bots_cfg = self.config.get("bots", {})
-        f_crafter = Frame(lf_bots)
-        f_crafter.pack(fill="x", pady=2)
-        Label(f_crafter, text="Crafter:", width=12, anchor="w").pack(side=LEFT)
-        self.vars["crafter_profile"] = StringVar(value=bots_cfg.get("crafter_profile", "ed4"))
-        Entry(f_crafter, textvariable=self.vars["crafter_profile"], width=20).pack(side=LEFT, padx=5)
+        for var_key, label, default in [
+            ("crafter_profile",    "Crafter Profile:",    bots_cfg.get("crafter_profile", "ed4")),
+            ("collector_profiles", "Collector Profiles:", ", ".join(bots_cfg.get("collector_profiles", []))),
+        ]:
+            f_r = Frame(t5, bg=BG)
+            f_r.pack(fill="x", pady=4)
+            _lbl(f_r, label, width=18, anchor="w").pack(side=LEFT)
+            self.vars[var_key] = StringVar(value=default)
+            Entry(f_r, textvariable=self.vars[var_key], width=22,
+                  font=("Tahoma", 8)).pack(side=LEFT, padx=4)
+        _lbl(t5, "(collectors: comma-separated)", fg="#888").pack(anchor="w", padx=4)
+        _btn(t5, "Take BODs Now", self.trigger_take_bods, "#87CEEB",
+             font=("Tahoma", 9, "bold"), width=16).pack(pady=(10, 4))
 
-        f_collectors = Frame(lf_bots)
-        f_collectors.pack(fill="x", pady=2)
-        Label(f_collectors, text="Collectors:", width=12, anchor="w").pack(side=LEFT)
-        collectors_str = ", ".join(bots_cfg.get("collector_profiles", ["ed2", "ed3", "ed5"]))
-        self.vars["collector_profiles"] = StringVar(value=collectors_str)
-        Entry(f_collectors, textvariable=self.vars["collector_profiles"], width=20).pack(side=LEFT, padx=5)
-
-        Button(lf_bots, text="Take BODs Now", command=self.trigger_take_bods,
-               bg="#87CEEB", font=("Arial", 9, "bold"), width=16).pack(pady=(4, 2))
-
-        # 4. Dashboard (Stats & Info)
-        lf_stats = LabelFrame(self.root, text="Live Stats Dashboard", padx=5, pady=5)
-        lf_stats.pack(fill="x", padx=10, pady=10)
-        
-        self.vars["stat_crafted"] = StringVar(value="BODs Filled: 0")
-        self.vars["stat_small"] = StringVar(value="Small Prizes: 0")
-        self.vars["stat_large"] = StringVar(value="Large Prizes: 0")
-        self.vars["stat_prizes"] = StringVar(value="Prizes: 0")
-
-        f_metric = Frame(lf_stats)
-        f_metric.pack(fill="x", pady=2)
-        Label(f_metric, textvariable=self.vars["stat_crafted"], fg="darkblue", font=("Arial", 10, "bold")).pack(side=LEFT, expand=True)
-        Label(f_metric, textvariable=self.vars["stat_small"], fg="darkgreen", font=("Arial", 10, "bold")).pack(side=LEFT, expand=True)
-        Label(f_metric, textvariable=self.vars["stat_large"], fg="darkmagenta", font=("Arial", 10, "bold")).pack(side=LEFT, expand=True)
-
-        f_metric2 = Frame(lf_stats)
-        f_metric2.pack(fill="x", pady=(0, 2))
-        Label(f_metric2, textvariable=self.vars["stat_prizes"], fg="darkorange", font=("Arial", 10, "bold")).pack(side=LEFT, expand=True)
-        
-        f_stat_btns = Frame(lf_stats)
-        f_stat_btns.pack(pady=4)
-        Button(f_stat_btns, text="Reset Stats", command=self.reset_stats, font=("Arial", 8)).pack(side=LEFT, padx=4)
-        Button(f_stat_btns, text="Save Report", command=save_performance_snapshot, font=("Arial", 8), bg="#C8E6C9").pack(side=LEFT, padx=4)
-
-        self.vars["timer"] = StringVar(value="Time: 00:00:00")
-        self.vars["status"] = StringVar(value="Status: Idle")
-        Label(lf_stats, textvariable=self.vars["status"], font=("Arial", 11, "bold")).pack(pady=(5,0))
-        Label(lf_stats, textvariable=self.vars["timer"], font=("Courier", 10)).pack()
-
-        # 5. Controls
-        f_ctl = Frame(self.root, pady=10)
-        f_ctl.pack()
-        Button(f_ctl, text="Save", command=self.save_config, bg="#DDD", width=10).pack(side=LEFT, padx=5)
-        Button(f_ctl, text="START CYCLE", command=self.start_cycling, bg="green", fg="white", font=("Arial", 9, "bold"), width=14).pack(side=LEFT, padx=5)
-        Button(f_ctl, text="Stop", command=self.stop_cycling, bg="red", fg="white", font=("Arial", 9, "bold"), width=10).pack(side=LEFT, padx=5)
+        # ── Bottom controls ────────────────────────────────────────────
+        f_ctl = Frame(self.root, bg=BG, pady=6)
+        f_ctl.pack(fill="x", padx=10)
+        _btn(f_ctl, "Save Config", self.save_config, width=12).pack(side=LEFT, padx=4)
+        Button(f_ctl, text="START CYCLE", command=self.start_cycling,
+               bg="#1A7A1A", fg="white", font=("Tahoma", 9, "bold"),
+               relief=RAISED, bd=2, width=14).pack(side=LEFT, padx=4)
+        Button(f_ctl, text="STOP", command=self.stop_cycling,
+               bg="#BB0000", fg="white", font=("Tahoma", 9, "bold"),
+               relief=RAISED, bd=2, width=10).pack(side=LEFT, padx=4)
 
         self.read_supplies_file()
         self.read_stats_file()
         self.update_timer()
         self.root.mainloop()
+
+    def open_prize_filter(self):
+        from tkinter import ttk
+        try:
+            from bod_data import prize_names
+        except ImportError:
+            prize_names = {}
+
+        BG = "#ECE9D8"
+        popup = Toplevel(self.root)
+        popup.title("Prize Filter")
+        popup.geometry("300x480")
+        popup.resizable(False, True)
+        popup.grab_set()
+        popup.configure(bg=BG)
+
+        prize_filter = self.config.get("prize_filter", DEFAULT_CONFIG.get("prize_filter", {}))
+        tailor_on = set(prize_filter.get("tailor", [23, 24]))
+        smith_on  = set(prize_filter.get("smith",  [12, 17, 19, 20, 21, 22]))
+        tailor_vars = {}
+        smith_vars  = {}
+
+        # Scrollable content area
+        canvas = Canvas(popup, bg=BG, highlightthickness=0)
+        vsb    = ttk.Scrollbar(popup, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=vsb.set)
+        vsb.pack(side=RIGHT, fill="y")
+        canvas.pack(fill="both", expand=True, padx=6, pady=4)
+        inner = Frame(canvas, bg=BG)
+        _cw   = canvas.create_window((0, 0), window=inner, anchor="nw")
+
+        def _on_inner_resize(e):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+        def _on_canvas_resize(e):
+            canvas.itemconfig(_cw, width=e.width)
+        inner.bind("<Configure>", _on_inner_resize)
+        canvas.bind("<Configure>", _on_canvas_resize)
+
+        # Tailor section
+        Label(inner, text="── Tailor ──", bg=BG,
+              font=("Tahoma", 9, "bold"), fg="#003399").pack(anchor="w", pady=(4, 2), padx=6)
+        for pid in (23, 24):
+            name = prize_names.get(pid, f"Prize #{pid}")
+            v = IntVar(value=1 if pid in tailor_on else 0)
+            tailor_vars[pid] = v
+            Checkbutton(inner, text=f"#{pid}: {name}", variable=v,
+                        bg=BG, font=("Tahoma", 8)).pack(anchor="w", padx=14)
+
+        # Smith section
+        Label(inner, text="── Smith ──", bg=BG,
+              font=("Tahoma", 9, "bold"), fg="#8B0000").pack(anchor="w", pady=(8, 2), padx=6)
+        for pid in range(1, 23):
+            name = prize_names.get(pid, f"Prize #{pid}")
+            v = IntVar(value=1 if pid in smith_on else 0)
+            smith_vars[pid] = v
+            Checkbutton(inner, text=f"#{pid}: {name}", variable=v,
+                        bg=BG, font=("Tahoma", 8)).pack(anchor="w", padx=14)
+
+        # Buttons
+        f_btns = Frame(popup, bg=BG, pady=6)
+        f_btns.pack(fill="x", padx=8)
+
+        def _save_close():
+            self.config.setdefault("prize_filter", {})
+            self.config["prize_filter"]["tailor"] = [pid for pid, v in tailor_vars.items() if v.get()]
+            self.config["prize_filter"]["smith"]  = [pid for pid, v in smith_vars.items()  if v.get()]
+            self.save_config()
+            popup.destroy()
+
+        Button(f_btns, text="Save & Close", command=_save_close,
+               bg="#1A7A1A", fg="white", font=("Tahoma", 9, "bold"),
+               relief=RAISED, bd=2).pack(side=RIGHT, padx=4)
+        Button(f_btns, text="Cancel", command=popup.destroy,
+               font=("Tahoma", 8), relief=RAISED, bd=2, bg=BG).pack(side=RIGHT, padx=2)
 
     def check_assembly_readiness(self):
         """
@@ -642,12 +854,14 @@ class BodCyclerGUI(threading.Thread):
         import json, os
         from bod_data import LARGE_COMPONENTS, prize_names, get_prize_number
 
-        if not os.path.exists(INVENTORY_FILE):
+        _conserva = self.config.get("books", {}).get("Conserva", 0)
+        _inv_file = get_inventory_file(_conserva) if _conserva else None
+        if not _inv_file or not os.path.exists(_inv_file):
             AddToSystemJournal("Assembly Check: inventory.json not found. Run a Scan first.")
             return
 
         try:
-            with open(INVENTORY_FILE, "r") as f:
+            with open(_inv_file, "r") as f:
                 inventory = json.load(f)
         except Exception as e:
             AddToSystemJournal(f"Assembly Check: Failed to read inventory.json — {e}")

@@ -15,7 +15,8 @@ from BodCycler_Utils import (
     BOD_TYPE, BOD_BOOK_TYPE, BOOK_GUMP_ID, NEXT_PAGE_BTN,
     load_config, check_abort, close_all_gumps,
     wait_for_gump, wait_for_gump_serial_change,
-    read_stats, write_stats, set_status
+    read_stats, write_stats, set_status, is_prize_enabled,
+    swap_talisman
 )
 
 NPC_TYPES = [0x0190, 0x0191]       # Male/Female human
@@ -32,6 +33,14 @@ SCISSORS = 0x0F9E
 OIL_CLOTH = 0x175D
 SANDALS = 0x170D
 BOOK_TYPE = 0x2259                 # BOD Book type ID
+BOD_TAILOR_COLOR  = 0x0483        # Hue of Tailor Bulk Order Deeds
+BOD_SMITH_COLOR   = 0x044E        # Hue of Smith Bulk Order Deeds
+
+# Smith BOD prizes that should be trashed (low-tier / unwanted reward types)
+SMITH_JUNK_TYPES = [
+    0x0F39,  # Pick-Shovel / Pickaxe
+    0x0E86   # Pickaxe
+]
 
 def find_tailor():
     SetFindDistance(10) 
@@ -68,19 +77,55 @@ def find_all_tailors():
                 tailors.append(npc)
     return weavers + tailors
 
+def find_smith():
+    SetFindDistance(10)
+    armorers, smiths = [], []
+    for npc_type in NPC_TYPES:
+        FindTypeEx(npc_type, 0xFFFF, Ground(), False)
+        for npc in GetFoundList():
+            name  = GetName(npc).lower()
+            title = GetAltName(npc).lower()
+            if 'armorer' in name or 'armorer' in title:
+                armorers.append(npc)
+            elif 'blacksmith' in name or 'blacksmith' in title:
+                smiths.append(npc)
+    if armorers: return armorers[0]
+    if smiths:   return smiths[0]
+    return 0
+
+def find_all_smiths():
+    """Returns all blacksmith/armorer NPCs found within search distance."""
+    SetFindDistance(12)
+    armorers, smiths = [], []
+    for npc_type in NPC_TYPES:
+        FindTypeEx(npc_type, 0xFFFF, Ground(), False)
+        for npc in GetFoundList():
+            name  = GetName(npc).lower()
+            title = GetAltName(npc).lower()
+            if 'guildmaster' in name or 'guildmaster' in title:
+                continue
+            if 'armorer' in name or 'armorer' in title:
+                armorers.append(npc)
+            elif 'blacksmith' in name or 'blacksmith' in title:
+                smiths.append(npc)
+    return armorers + smiths
+
 def move_to_npc(npc):
     if npc > 0 and GetDistance(npc) > 1:
         newMoveXY(GetX(npc), GetY(npc), False, 1, True)
         Wait(500)
 
 def sort_new_bods(config):
-    """Smart Sorter: Small -> Origine | Valuable Large -> Conserva | Junk Large -> Scartare."""
+    """Smart Sorter: Small -> Origine | Valuable Large -> Conserva | Junk/Bone Large -> Scartare | Unknown -> Riprova."""
     origine_serial  = config.get("books", {}).get("Origine", 0)
     consegna_serial = config.get("books", {}).get("Consegna", 0)
     conserva_serial = config.get("books", {}).get("Conserva", 0)
     scartare_serial = config.get("books", {}).get("Scartare", 0)
-    
-    FindType(BOD_TYPE, Backpack())
+    riprova_serial  = config.get("books", {}).get("Riprova", 0)
+    cycle_type      = config.get("cycle_type", "Tailor")
+
+    bod_color = BOD_SMITH_COLOR if cycle_type == "Smith" else BOD_TAILOR_COLOR
+    FindTypeEx(BOD_TYPE, bod_color, Backpack(), False)
     loose_bods = list(GetFoundList())
     
     if not loose_bods: return
@@ -90,25 +135,24 @@ def sort_new_bods(config):
     for bod in loose_bods:
         world_save_guard()
         
-        # We rely on the central parse_bod logic from bod_data to perfectly identify the BOD properties!
-        info = BodCycler_Crafting.parse_bod(bod)
+        info = BodCycler_Crafting.parse_bod(bod, cycle_type)
         
         dest_book = 0
         dest_name = ""
         parsed_bod = None
         
-        if not info or info.get('item_name') == "Unknown":
-            AddToSystemJournal(f"WARNING: Failed to parse BOD {hex(bod)}. Routing to Scartare for safety.")
-            if scartare_serial != 0:
-                dest_book = scartare_serial
-                dest_name = "Scartare"
+        if not info or info.get('item_name', '').lower() == "unknown":
+            AddToSystemJournal(f"WARNING: Unrecognised BOD {hex(bod)} — routing to Riprova for manual review.")
+            if riprova_serial != 0:
+                dest_book = riprova_serial
+                dest_name = "Riprova"
         elif info.get('is_large'):
             # STRICT SCARTARE LOGIC (Identical to Crafting script using prize_id)
             # AddToSystemJournal(info) # Debug
             is_scartare = False
             if info.get('material', '').lower() == "bone":
                 is_scartare = True
-            elif info.get('prize_id') not in [23, 24]:
+            elif not is_prize_enabled(info.get('prize_id'), config):
                 is_scartare = True
                 
             if not is_scartare and conserva_serial != 0:
@@ -156,7 +200,7 @@ def sort_new_bods(config):
             if dest_name == "Conserva" and parsed_bod:
                 try:
                     import BodCycler_Assembler
-                    BodCycler_Assembler.append_to_inventory(parsed_bod)
+                    BodCycler_Assembler.append_to_inventory(parsed_bod, conserva_serial)
                 except Exception as e:
                     AddToSystemJournal(f"Failed to push BOD to Assembler JSON: {e}")
                 
@@ -324,18 +368,19 @@ def travel_to(runebook_serial, travel_method, rune_index):
         Wait(100)
     return False
 
-def process_prizes_at_home(trash_serial, material_crate_serial, dye_tub_serial, reward_crate_serial, rb_serial=0):
+def process_prizes_at_home(trash_serial, material_crate_serial, dye_tub_serial, reward_crate_serial, rb_serial=0, cycle_type="Tailor"):
     """
-    Handles post-cycle cleanup. 
+    Handles post-cycle cleanup.
     Args:
         trash_serial: ID of the Trash Barrel.
-        material_crate_serial: ID for storing processed resources (Cloth).
-        reward_crate_serial: ID for storing high-value rewards (Runics/CBDs).
+        material_crate_serial: ID for storing processed resources (Cloth/Ore).
+        reward_crate_serial: ID for storing high-value rewards (Runics/CBDs/Hammers).
         dye_tub_serial: ID of the Cloth Dye Tub.
         rb_serial: ID of the Runebook to avoid moving it.
+        cycle_type: "Tailor" or "Smith" — controls which prizes and materials to process.
     """
 
-    # 1. Clean up trash items
+    # 1. Clean up trash items (both modes)
     if trash_serial != 0:
         for junk_type in [0x175D, 0x170D]: # OIL_CLOTH (0x175D), SANDALS (0x170D)
             FindType(junk_type, Backpack())
@@ -345,8 +390,17 @@ def process_prizes_at_home(trash_serial, material_crate_serial, dye_tub_serial, 
                 MoveItem(junk, 0, trash_serial, 0, 0, 0)
                 Wait(800)
 
-    # 2. Dye colored cloth and move to MATERIAL crate
-    if material_crate_serial != 0:
+        if cycle_type == "Smith":
+            for junk_type in SMITH_JUNK_TYPES:
+                FindType(junk_type, Backpack())
+                for junk in GetFoundList():
+                    if check_abort(): return
+                    world_save_guard()
+                    MoveItem(junk, 0, trash_serial, 0, 0, 0)
+                    Wait(800)
+
+    # 2. Dye colored cloth and move to MATERIAL crate (Tailor only)
+    if cycle_type == "Tailor" and material_crate_serial != 0:
         for c_type in [0x1766, 0x1767]: # CLOTH_1, CLOTH_2
             FindType(c_type, Backpack())
             for cloth in GetFoundList():
@@ -358,44 +412,77 @@ def process_prizes_at_home(trash_serial, material_crate_serial, dye_tub_serial, 
                     if TargetPresent():
                         TargetToObject(cloth)
                         Wait(600)
-                # Note: Cloth moves to material_crate_serial
                 MoveItem(cloth, 0, material_crate_serial, 0, 0, 0)
                 Wait(800)
-                
-    # 3. Move specific high-value rewards to REWARD crate
+
+    # 3. Move high-value prizes to REWARD crate
     if reward_crate_serial != 0:
-        for prize_type in [0x14F0, 0x0F9D]:
-            FindType(prize_type, Backpack())
+
+        def _move_prize(item, name):
+            AddToSystemJournal(f"Moving {name} to Reward Crate.")
+            MoveItem(item, 0, reward_crate_serial, 0, 0, 0)
+            Wait(800)
+            stats = read_stats()
+            stats["prizes_dropped"] = stats.get("prizes_dropped", 0) + 1
+            write_stats(stats)
+            BodCycler_AI_Debugger.send_prize_notification(name)
+
+        if cycle_type == "Tailor":
+            # Barbed Runic Sewing Kit: type 0x0F9D, color 0x0851
+            FindType(0x0F9D, Backpack())
             for item in GetFoundList():
                 if check_abort(): return
-                
-                i_color = GetColor(item)
-                should_move = False
-                
-                # Check Sewing Kits (0x0F9D) specifically for Barbed Runic color (0x0851)
-                if prize_type == 0x0F9D and i_color == 0x0851:
-                    should_move = True
-                    
-                # Check Deeds (0x14F0) for Clothing Bless Deed (Color 0x0000 + tooltip)
-                elif prize_type == 0x14F0 and i_color == 0x0000:
-                    tooltip = GetTooltip(item).lower()
-                    if "clothing bless deed" in tooltip:
-                        should_move = True
-                
-                # If it passed the checks, move it to the reward crate
-                if should_move:
+                if GetColor(item) == 0x0851:
                     world_save_guard()
-                    if prize_type == 0x0F9D and i_color == 0x0851:
-                        prize_name = "Barbed Runic Kit"
-                    else:
-                        prize_name = "Clothing Bless Deed"
-                    AddToSystemJournal(f"Moving {prize_name} to Reward Crate.")
-                    MoveItem(item, 0, reward_crate_serial, 0, 0, 0)
-                    Wait(800)
-                    stats = read_stats()
-                    stats["prizes_dropped"] = stats.get("prizes_dropped", 0) + 1
-                    write_stats(stats)
-                    BodCycler_AI_Debugger.send_prize_notification(prize_name)
+                    _move_prize(item, "Barbed Runic Kit")
+
+            # Clothing Bless Deed: type 0x14F0, color 0x0000, tooltip check
+            FindType(0x14F0, Backpack())
+            for item in GetFoundList():
+                if check_abort(): return
+                if GetColor(item) == 0x0000:
+                    if "clothing bless deed" in GetTooltip(item).lower():
+                        world_save_guard()
+                        _move_prize(item, "Clothing Bless Deed")
+
+        elif cycle_type == "Smith":
+            # Runic Hammers: type 0x13E3, any non-zero color = a runic tier
+            # Color matches ore hues: DC=0x0973, Shadow=0x0966, Copper=0x096D,
+            # Bronze=0x0972, Gold=0x08A5, Agapite=0x0979, Verite=0x089F, Valorite=0x08AB
+            from bod_data import prize_names as _prize_names
+            runic_hues = {
+                0x0973: "Dull Copper Runic Hammer",
+                0x0966: "Shadow Iron Runic Hammer",
+                0x096D: "Copper Runic Hammer",
+                0x0972: "Bronze Runic Hammer",
+                0x08A5: "Gold Runic Hammer",
+                0x0979: "Agapite Runic Hammer",
+                0x089F: "Verite Runic Hammer",
+                0x08AB: "Valorite Runic Hammer",
+            }
+            FindType(0x13E3, Backpack())  # Smith's Hammer base type
+            for item in GetFoundList():
+                if check_abort(): return
+                hue = GetColor(item)
+                if hue in runic_hues:
+                    world_save_guard()
+                    _move_prize(item, runic_hues[hue])
+
+            # Power Scrolls: type 0x14F0 — check tooltip for "power scroll"
+            FindType(0x14F0, Backpack())
+            for item in GetFoundList():
+                if check_abort(): return
+                tooltip = GetTooltip(item).lower()
+                if "power scroll" in tooltip:
+                    world_save_guard()
+                    _move_prize(item, f"Power Scroll ({GetTooltip(item).split('|')[0].strip()})")
+
+            # Ancient Smith's Hammer: type 0x0FB4
+            FindType(0x0FB4, Backpack())
+            for item in GetFoundList():
+                if check_abort(): return
+                world_save_guard()
+                _move_prize(item, "Ancient Smith's Hammer")
 
 def execute_trade_loop():
     config = load_config()
@@ -405,8 +492,10 @@ def execute_trade_loop():
     if target_trades is None:
         AddToSystemJournal("Error: 'target_trades' missing from config.")
         return
-    buy_cloth_amount = config.get("trade", {}).get("buy_cloth_amount", 80)
+    buy_cloth_amount  = config.get("trade", {}).get("buy_cloth_amount", 80)
     buy_cloth_enabled = config.get("trade", {}).get("buy_cloth_enabled", True)
+    cycle_type        = config.get("cycle_type", "Tailor")
+    swap_talisman(cycle_type, config)
 
     consegna_serial = config.get("books", {}).get("Consegna", 0)
     rb_serial = config.get("travel", {}).get("RuneBook", 0)
@@ -423,23 +512,34 @@ def execute_trade_loop():
 
     close_all_gumps()
 
-    # Collect all available tailor NPCs. Travel to each configured rune location
+    # Select rune keys and NPC finder based on cycle type.
+    # Smith1/Smith2 are in config already. Set a rune index to 0 to skip that location.
+    if cycle_type == "Smith":
+        rune_keys   = ["Smith1", "Smith2"]
+        find_all_fn = find_all_smiths
+        npc_label   = "blacksmiths"
+    else:
+        rune_keys   = ["Tailor1", "Tailor2", "Tailor3"]
+        find_all_fn = find_all_tailors
+        npc_label   = "tailors"
+
+    # Collect all available NPCs. Travel to each configured rune location
     # in order and stop as soon as at least one NPC is found. If NPCs are at
     # different locations (e.g. Tailor1 + Tailor3), set Tailor2 = 0 to skip it.
     npc_list = []
-    for rune_key in ["Tailor1", "Tailor2", "Tailor3"]:
+    for rune_key in rune_keys:
         rune_idx = config.get("travel", {}).get("Runes", {}).get(rune_key, 0)
         if rune_idx == 0:
             continue
         travel_to(rb_serial, travel_method, rune_idx)
-        for npc in find_all_tailors():
+        for npc in find_all_fn():
             if npc not in npc_list:
                 npc_list.append(npc)
         if npc_list:
             break  # Found NPCs here — no need to travel further
 
     if not npc_list:
-        AddToSystemJournal("execute_trade_loop: No tailors found at any configured location.")
+        AddToSystemJournal(f"execute_trade_loop: No {npc_label} found at any configured location.")
         return
 
     AddToSystemJournal(f"execute_trade_loop: Found {len(npc_list)} NPC(s) to cycle through.")
@@ -501,17 +601,18 @@ def execute_trade_loop():
         write_stats(stats)
 
     if not check_abort():
-        if buy_cloth_enabled:
+        if cycle_type == "Tailor" and buy_cloth_enabled:
             buy_and_cut_cloth(npc_list[0], buy_cloth_amount)
-        else:
+        elif cycle_type == "Tailor":
             AddToSystemJournal("Buy Cloth: OFF — skipping.")
+        # Smith: ore is pre-stocked in MaterialCrate — no NPC buying needed.
         ws1_index = config.get("travel", {}).get("Runes", {}).get("WorkSpot1", 1)
         travel_to(rb_serial, travel_method, ws1_index)
 
         if home_x != 0 and home_y != 0:
             newMoveXY(home_x, home_y, True, 0, True)
 
-        process_prizes_at_home(trash_serial, crate_serial, dye_tub_serial, reward_crate_serial, rb_serial)
+        process_prizes_at_home(trash_serial, crate_serial, dye_tub_serial, reward_crate_serial, rb_serial, cycle_type)
 
     AddToSystemJournal("Route Complete. Cycle successful.")
 

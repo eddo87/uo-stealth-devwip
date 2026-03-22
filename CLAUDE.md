@@ -10,9 +10,10 @@ It uses a **Central Orchestrator** pattern where a primary Python Tkinter GUI ma
 
 *If you need to understand specific function signatures, historical bug fixes, or detailed data flow, search these files:*
 
-* **README.md**: General architecture and data flow diagrams.  
-* **docs/Project\_Architecture.md**: Exhaustive function reference and module responsibilities.  
+* **README.md**: General architecture and data flow diagrams.
+* **docs/Project\_Architecture.md**: Exhaustive function reference and module responsibilities.
 * **docs/knowledge01.json**: Historical bug fixes, Stealth API quirks (e.g., FindCount vs GetFindCount), and exact NPC/Gump hex IDs.
+* **docs/debug\_scripts/**: Standalone in-game diagnostic scripts. Run these when investigating crafting issues, gump button mismatches, or graphic ID drift. Do NOT run during normal cycling — they craft/consume materials. Key scripts: `BodCycler_GumpDebug.py` (Smith button mapper), `BodCycler_SmithIDDebug.py` (graphic ID verifier), `_debug_IDs.py` (Tailor graphic ID verifier), `_debug_craftBtn.py` (Tailor button mapper).
 
 ## **🚀 Commands (HOW)**
 

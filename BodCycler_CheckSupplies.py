@@ -71,7 +71,7 @@ from BodCycler_Utils import (
     BOD_TYPE, BOD_BOOK_TYPE, BOOK_GUMP_ID, NEXT_PAGE_BTN,
     load_config, check_abort, close_all_gumps,
     wait_for_gump, wait_for_gump_serial_change,
-    read_stats, write_stats, set_status
+    read_stats, write_stats, set_status, swap_talisman
 )
 
 def save_supplies_to_json(data):
@@ -298,7 +298,8 @@ def check_supplies():
     crate_id = config["containers"]["MaterialCrate"]
     origine_book_id = config["books"]["Origine"]
     
-    craft_type = config.get("cycle_type", "Tailor") 
+    craft_type = config.get("cycle_type", "Tailor")
+    swap_talisman(craft_type, config)
 
     if crate_id == 0:
         AddToSystemJournal("Error: Material Crate not set in Config.")
@@ -310,11 +311,27 @@ def check_supplies():
     UseObject(crate_id)
     Wait(1000)
 
-    # Dye any colored cloth back to normal and stash it
-    dye_and_store_colored_cloth(backpack_id, crate_id)
+    # Dye any colored cloth back to normal and stash it (Tailor only — Smith uses ingots)
+    if craft_type == "Tailor":
+        dye_and_store_colored_cloth(backpack_id, crate_id)
 
-    # Count Base Materials
-    ingots_total = get_item_count(INGOT_TYPE, crate_id, 0) + get_item_count(INGOT_TYPE, backpack_id, 0)
+    # Count Ingots by Ore Type
+    _INGOT_HUES = {
+        "Iron":       0x0000,
+        "DullCopper": 0x0973,
+        "ShadowIron": 0x0966,
+        "Copper":     0x096D,
+        "Bronze":     0x0972,
+        "Gold":       0x08A5,
+        "Agapite":    0x0979,
+        "Verite":     0x089F,
+        "Valorite":   0x08AB,
+    }
+    ingot_counts = {
+        name: get_item_count(INGOT_TYPE, crate_id, hue) + get_item_count(INGOT_TYPE, backpack_id, hue)
+        for name, hue in _INGOT_HUES.items()
+    }
+    ingots_total = ingot_counts["Iron"]  # used by restock_ingots
     
     # Count Both Types of Cloth
     cloth_total = (
@@ -352,12 +369,20 @@ def check_supplies():
     supply_data = {
         "timestamp": str(datetime.now()),
         "resources": {
-            "Ingots": ingots_total,
-            "Cloth": cloth_total,
-            "Leather": l_normal,
-            "Spined": l_spined,
-            "Horned": l_horned,
-            "Barbed": l_barbed
+            "Ingots":     ingot_counts["Iron"],
+            "DullCopper": ingot_counts["DullCopper"],
+            "ShadowIron": ingot_counts["ShadowIron"],
+            "Copper":     ingot_counts["Copper"],
+            "Bronze":     ingot_counts["Bronze"],
+            "Gold":       ingot_counts["Gold"],
+            "Agapite":    ingot_counts["Agapite"],
+            "Verite":     ingot_counts["Verite"],
+            "Valorite":   ingot_counts["Valorite"],
+            "Cloth":      cloth_total,
+            "Leather":    l_normal,
+            "Spined":     l_spined,
+            "Horned":     l_horned,
+            "Barbed":     l_barbed,
         },
         "tools": {
             "TinkerTools": tt_count,

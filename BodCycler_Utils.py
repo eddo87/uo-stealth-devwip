@@ -21,7 +21,13 @@ except ImportError:
 # ---------------------------------------------------------------------------
 CONFIG_FILE      = f"{StealthPath()}Scripts\\{CharName()}_bodcycler_config.json"
 STATS_FILE       = f"{StealthPath()}Scripts\\{CharName()}_bodcycler_stats.json"
-INVENTORY_FILE   = f"{StealthPath()}Scripts\\{CharName()}_bodcycler_inventory.json"
+INVENTORY_FILE   = f"{StealthPath()}Scripts\\{CharName()}_bodcycler_inventory.json"  # legacy fallback
+
+def get_inventory_file(book_serial):
+    """Returns a per-book inventory JSON path keyed by the Conserva book serial.
+    One file per physical book — Tailor and Smith never share the same database.
+    """
+    return f"{StealthPath()}Scripts\\{CharName()}_bodcycler_inventory_{hex(book_serial)}.json"
 SUPPLY_FILE      = f"{StealthPath()}Scripts\\{CharName()}_bodcycler_supplies.json"
 PERFORMANCE_FILE = f"{StealthPath()}Scripts\\{CharName()}_bodcycler_performance.json"
 
@@ -205,3 +211,67 @@ def wait_for_gump_serial_change(current_serial, gump_id, timeout_ms=8000):
                 if info["Serial"] != current_serial:
                     return i, info["Serial"], True
     return -1, current_serial, False
+
+
+def is_prize_enabled(prize_id, config):
+    """Returns True if prize_id is in the user's prize_filter for the current cycle type."""
+    if not prize_id:
+        return False
+    cycle_type = config.get("cycle_type", "Tailor")
+    key = "tailor" if cycle_type == "Tailor" else "smith"
+    enabled = config.get("prize_filter", {}).get(key, [])
+    return prize_id in enabled
+
+
+TALISMAN_TYPE = 0x2F5B
+
+def swap_talisman(cycle_type, config):
+    """Equips the correct talisman for the given cycle_type.
+    Lookup order: stored serial in config → tooltip keyword scan in backpack.
+    Logs + Discord alert if not found; returns True on success, False on failure.
+    """
+    import BodCycler_AI_Debugger
+
+    keyword       = "tailoring" if cycle_type == "Tailor" else "blacksmithing"
+    target_serial = config.get("talismans", {}).get(cycle_type, 0)
+    layer         = TalismanLayer()
+
+    # Fallback: scan backpack by tooltip keyword if serial not configured
+    if not target_serial:
+        FindType(TALISMAN_TYPE, Backpack())
+        for item in GetFoundList():
+            if keyword in GetTooltip(item).lower():
+                target_serial = item
+                break
+
+    if not target_serial:
+        msg = f"[Talisman] No {cycle_type} talisman found — continuing without swap."
+        AddToSystemJournal(msg)
+        try:
+            #BodCycler_AI_Debugger.send_error_alert("talisman_missing", cycle_type, msg, False)
+            Misc.Pause(10)
+        except Exception:
+            pass
+        return False
+
+    # Already wearing the right one
+    if ObjAtLayer(layer) == target_serial:
+        return True
+
+    # Unequip current talisman, equip new one
+    UnEquip(layer)
+    Wait(600)
+    Equip(layer, target_serial)
+    Wait(600)
+
+    if ObjAtLayer(layer) == target_serial:
+        AddToSystemJournal(f"[Talisman] Equipped {cycle_type} talisman ({hex(target_serial)}).")
+        return True
+
+    msg = f"[Talisman] Failed to equip {cycle_type} talisman ({hex(target_serial)})."
+    AddToSystemJournal(msg)
+    try:
+        BodCycler_AI_Debugger.send_error_alert("talisman_equip_fail", cycle_type, msg, False)
+    except Exception:
+        pass
+    return False
