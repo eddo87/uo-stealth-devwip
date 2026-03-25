@@ -326,9 +326,9 @@ def parse_bod(bod_serial, cycle_type="Tailor"):
         "qty_total": qty_total, 
         "qty_finished": qty_finished, 
         "qty_needed": qty_needed,
-        "item_name": item_name, 
-        "material": mat, 
-        "cat": cat, 
+        "item_name": item_name,
+        "material": mat_proper,
+        "cat": cat,
         "prize_id": prize_id
     }
 

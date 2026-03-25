@@ -104,7 +104,11 @@ SMITH_ITEMS = {
     "metal kite shield":    (15, 30, 0x1B74, 20, "iron"),
     "tear kite shield":     (15, 37, 0x1B78, 20, "iron"),
     # ── Axes (cat=22) ─────────────────────────────────────────────────────────
+    "axe":                  (22, 2,  0x0F49, 6,  "iron"),
     "battle axe":           (22, 9,  0x0F47, 13, "iron"),
+    "executioner's axe":    (22, 23, 0x0F45, 13, "iron"),
+    "two handed axe":       (22, 37, 0x1443, 13, "iron"),
+    "war axe":              (22, 44, 0x13AF, 10, "iron"),
     # ── Bladed weapons (cat=29) ───────────────────────────────────────────────
     "bone harvester":       (29, 2,  0x26BB, 10, "iron"),
     "broadsword":           (29, 9,  0x0F5E, 10, "iron"),
@@ -122,6 +126,8 @@ SMITH_ITEMS = {
     "war hammer":           (50, 37, 0x1439, 17, "iron"),
     # ── Polearms (cat=57) ─────────────────────────────────────────────────────
     "spear":                (57, 51, 0x0F62, 6,  "iron"),
+    # ── Routing-only (btn=0 → not crafted; large BODs routed to Scartare) ────
+    "bardiche":             (0,  0,  0x0F4D, 0,  "iron"),
 }
 
 MATERIAL_MAP = {

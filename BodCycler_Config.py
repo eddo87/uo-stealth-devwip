@@ -76,8 +76,12 @@ DEFAULT_CONFIG = {
         "Smith":  0
     },
     "containers": {
-        "MaterialCrate": 0, "TrashBarrel": 0, "ClothDyeTub": 0, "RewardCrate": 0, "BodBookCrate": 0
+        "MaterialCrate": 0, "TrashBarrel": 0, "ClothDyeTub": 0, "RewardCrate": 0,
+        "BodBookCrate": 0, "ConservaCrate": 0
     },
+    "conserva_books_tailor": [0, 0, 0, 0, 0],
+    "conserva_books_smith":  [0, 0, 0, 0, 0],
+    "conserva_manager": {"keep_tier1": 10, "keep_tier2": 20},
     "travel": {
         "RuneBook": 0, "Method": "Recall",
         "Runes": {
@@ -132,6 +136,9 @@ class BodCyclerGUI(threading.Thread):
         if "bots" not in self.config: self.config["bots"] = {"crafter_profile": "ed4", "collector_profiles": ["ed2", "ed3", "ed5"]}
         if "crafter_profile" not in self.config["bots"]: self.config["bots"]["crafter_profile"] = "ed4"
         if "collector_profiles" not in self.config["bots"]: self.config["bots"]["collector_profiles"] = ["ed2", "ed3", "ed5"]
+        if "conserva_books_tailor" not in self.config: self.config["conserva_books_tailor"] = [0, 0, 0, 0, 0]
+        if "conserva_books_smith" not in self.config: self.config["conserva_books_smith"] = [0, 0, 0, 0, 0]
+        if "conserva_manager" not in self.config: self.config["conserva_manager"] = {"keep_tier1": 10, "keep_tier2": 20}
 
     def save_config(self):
         for name, var in self.vars.items():
@@ -185,6 +192,9 @@ class BodCyclerGUI(threading.Thread):
             elif category == "books": self.config["books"][key] = serial
             elif category == "containers": self.config["containers"][key] = serial
             elif category == "travel": self.config["travel"][key] = serial
+            elif category in ("conserva_books_tailor", "conserva_books_smith"):
+                idx = int(key)
+                self.config[category][idx] = serial
             
             if label_widget:
                 label_widget.config(text=f"{key}: {hex(serial)}", fg="blue")
@@ -249,6 +259,109 @@ class BodCyclerGUI(threading.Thread):
         except Exception as e:
             AddToSystemJournal(f"BOD Collection error: {e}")
             self.set_global_status("Error (See Journal)")
+
+    # --- Conserva Manager Triggers ---
+    def trigger_conserva_scan(self):
+        self.save_config()
+        self.set_global_status("Scanning Conserva Books...")
+        def _run():
+            try:
+                import importlib, BodCycler_ConservaManager as cm; importlib.reload(cm)
+                if self.vars["trim_tailor"].get():
+                    cm.scan_all_books(self.config, "Tailor")
+                if self.vars["trim_smith"].get():
+                    cm.scan_all_books(self.config, "Smith")
+                self.set_global_status("Idle")
+            except Exception as e:
+                AddToSystemJournal(f"Conserva Scan error: {e}")
+                self.set_global_status("Error (See Journal)")
+        threading.Thread(target=_run, daemon=True).start()
+
+    def trigger_conserva_analyze(self):
+        self.save_config()
+        def _run():
+            try:
+                import importlib
+                import importlib, BodCycler_ConservaManager as cm; importlib.reload(cm)
+                importlib.reload(cm)
+                if self.vars["trim_tailor"].get():
+                    cm.analyze_and_log(self.config, "Tailor")
+                if self.vars["trim_smith"].get():
+                    cm.analyze_and_log(self.config, "Smith")
+            except Exception as e:
+                AddToSystemJournal(f"Conserva Analyze error: {e}")
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _clear_conserva_book(self, list_key, idx, label_widget, tier):
+        self.config[list_key][idx] = 0
+        label_widget.config(text=f"{idx+1}. {tier}: Not Set", fg="#888")
+
+    def trigger_conserva_check_overflow(self):
+        self._conserva_overflow_mode = True
+        self.save_config()
+        def _run():
+            try:
+                import importlib, BodCycler_ConservaManager as cm; importlib.reload(cm)
+                cycle = "Tailor" if self.vars["trim_tailor"].get() else "Smith"
+                cm.check_completable_sets(self.config, cycle, overflow_only=True)
+            except Exception as e:
+                AddToSystemJournal(f"Conserva Overflow Check error: {e}")
+        threading.Thread(target=_run, daemon=True).start()
+
+    def trigger_conserva_check(self):
+        self._conserva_overflow_mode = False
+        self.save_config()
+        def _run():
+            try:
+                import importlib, BodCycler_ConservaManager as cm; importlib.reload(cm)
+                cycle = "Tailor" if self.vars["trim_tailor"].get() else "Smith"
+                cm.check_completable_sets(self.config, cycle)
+            except Exception as e:
+                AddToSystemJournal(f"Conserva Check Sets error: {e}")
+        threading.Thread(target=_run, daemon=True).start()
+
+    def trigger_conserva_next_set(self):
+        """Prepares RE drops for the next completable set. Respects last check mode."""
+        self.save_config()
+        overflow = getattr(self, '_conserva_overflow_mode', False)
+        def _run():
+            try:
+                import importlib, BodCycler_ConservaManager as cm; importlib.reload(cm)
+                cycle = "Tailor" if self.vars["trim_tailor"].get() else "Smith"
+                cm.extract_and_combine_next_set(self.config, cycle, overflow_only=overflow)
+            except Exception as e:
+                AddToSystemJournal(f"Conserva Next Set error: {e}")
+        threading.Thread(target=_run, daemon=True).start()
+
+    def trigger_conserva_combine(self):
+        """After CTRL+K dropped 1 set, combines Large+Smalls and routes to Consegna."""
+        self.save_config()
+        self.set_global_status("Combining set...")
+        def _run():
+            try:
+                import importlib, BodCycler_ConservaManager as cm; importlib.reload(cm)
+                cycle = "Tailor" if self.vars["trim_tailor"].get() else "Smith"
+                cm.assemble_dropped_set(self.config, cycle)
+                self.set_global_status("Idle")
+            except Exception as e:
+                AddToSystemJournal(f"Conserva Combine error: {e}")
+                self.set_global_status("Error (See Journal)")
+        threading.Thread(target=_run, daemon=True).start()
+
+    def trigger_conserva_trim(self):
+        """Called after CTRL+K finishes dropping BODs. Routes them and preps next batch."""
+        self.save_config()
+        self.set_global_status("Routing drops...")
+        def _run():
+            try:
+                import importlib, BodCycler_ConservaManager as cm; importlib.reload(cm)
+                cycle = "Tailor" if self.vars["trim_tailor"].get() else "Smith"
+                cm.route_dropped_bods(self.config, cycle)
+                self.set_global_status("Idle")
+            except Exception as e:
+                AddToSystemJournal(f"Conserva Route error: {e}")
+                self.set_global_status("Error (See Journal)")
+        threading.Thread(target=_run, daemon=True).start()
 
     # --- Navigation Helpers ---
     def test_travel(self, rune_key_name):
@@ -755,6 +868,63 @@ class BodCyclerGUI(threading.Thread):
         _lbl(t5, "(collectors: comma-separated)", fg="#888").pack(anchor="w", padx=4)
         _btn(t5, "Take BODs Now", self.trigger_take_bods, "#87CEEB",
              font=("Tahoma", 9, "bold"), width=16).pack(pady=(10, 4))
+
+        # ═══════════════════════════════════════════════
+        # TAB 6 — Conserva Manager
+        # ═══════════════════════════════════════════════
+        t6 = Frame(nb, bg=BG, padx=8, pady=6)
+        nb.add(t6, text=" Conserva ")
+
+        # Row 1: Action buttons (left) + Conserva Crate target (right)
+        f_top6 = Frame(t6, bg=BG)
+        f_top6.pack(fill="x", pady=(0, 4))
+        _btn(f_top6, "Scan All",     self.trigger_conserva_scan,      "#FFB6C1").pack(side=LEFT, padx=2)
+        _btn(f_top6, "Analyze",      self.trigger_conserva_analyze,  "#B0E0E6").pack(side=LEFT, padx=2)
+        _btn(f_top6, "Route Drops",  self.trigger_conserva_trim,     "#90EE90").pack(side=LEFT, padx=2)
+
+        # Row 2: Set assembly flow
+        f_sets6 = Frame(t6, bg=BG)
+        f_sets6.pack(fill="x", pady=(0, 4))
+        _btn(f_sets6, "Check Sets",    self.trigger_conserva_check,          "#DDA0DD").pack(side=LEFT, padx=2)
+        _btn(f_sets6, "Overflow Sets", self.trigger_conserva_check_overflow, "#E8D0FF").pack(side=LEFT, padx=2)
+        _btn(f_sets6, "Next Set",      self.trigger_conserva_next_set,       "#FFD700").pack(side=LEFT, padx=2)
+        _btn(f_sets6, "Combine Set",   self.trigger_conserva_combine,        "#90EE90").pack(side=LEFT, padx=2)
+        cc_serial = self.config["containers"].get("ConservaCrate", 0)
+        cc_text = f"Crate: {hex(cc_serial)}" if cc_serial else "Crate: Not Set"
+        cc_fg = "navy" if cc_serial else "red"
+        _btn(f_top6, "Target",
+             lambda: self.get_target("containers", "ConservaCrate", lw_cc),
+             width=6).pack(side=RIGHT, padx=2)
+        lw_cc = _lbl(f_top6, cc_text, fg=cc_fg, anchor="e")
+        lw_cc.pack(side=RIGHT, padx=2)
+
+        # Tailor section: toggle + 5 book rows
+        for section_label, list_key, trim_var_key in [
+            ("Tailor", "conserva_books_tailor", "trim_tailor"),
+            ("Smith",  "conserva_books_smith",  "trim_smith"),
+        ]:
+            f_hdr = Frame(t6, bg=BG)
+            f_hdr.pack(fill="x", pady=(6, 1))
+            self.vars[trim_var_key] = BooleanVar(value=(section_label == "Tailor"))
+            Checkbutton(f_hdr, text=f"Trim {section_label}", variable=self.vars[trim_var_key],
+                        bg=BG, font=("Tahoma", 8, "bold")).pack(side=LEFT)
+
+            book_list = self.config.get(list_key, [0]*5)
+            for i in range(5):
+                s = book_list[i] if i < len(book_list) else 0
+                tier = "Best" if i == 0 else ("Tier 2" if i <= 2 else "Overflow")
+                t_text = f"{i+1}. {tier}: {hex(s)}" if s else f"{i+1}. {tier}: Not Set"
+                fg_c = "navy" if s else "#888"
+                f_row = Frame(t6, bg=BG)
+                f_row.pack(fill="x", pady=1)
+                lw = _lbl(f_row, t_text, fg=fg_c, width=24, anchor="w")
+                lw.pack(side=LEFT)
+                _btn(f_row, "Target",
+                     lambda idx=i, c=list_key, l=lw: self.get_target(c, str(idx), l),
+                     width=6).pack(side=LEFT, padx=2)
+                _btn(f_row, "X",
+                     lambda idx=i, c=list_key, l=lw, t=tier: self._clear_conserva_book(c, idx, l, t),
+                     width=2, bg="#FFAAAA").pack(side=LEFT, padx=1)
 
         # ── Bottom controls ────────────────────────────────────────────
         f_ctl = Frame(self.root, bg=BG, pady=6)

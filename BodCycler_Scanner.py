@@ -197,11 +197,18 @@ def map_and_save_book_inventory(book_serial):
         if not g: break
         
         bods_on_page = parse_page_visually(g)
-        
-        for bod in bods_on_page:
+
+        # Read actual drop button IDs from the gump, sorted by Y (top to bottom)
+        drop_buttons = sorted(
+            [b for b in g.get('GumpButtons', []) if b.get('ReturnValue', 0) >= 5],
+            key=lambda b: b.get('Y', 0)
+        )
+        drop_btn_ids = [b['ReturnValue'] for b in drop_buttons]
+
+        for i, bod in enumerate(bods_on_page):
             bod['page'] = page_num
             bod['pos'] = global_pos
-            bod['drop_btn'] = 5 + (global_pos * 2)
+            bod['drop_btn'] = drop_btn_ids[i] if i < len(drop_btn_ids) else 5 + (i * 2)
             inventory.append(bod)
             global_pos += 1
             

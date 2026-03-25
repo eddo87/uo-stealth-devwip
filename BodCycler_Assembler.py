@@ -38,12 +38,7 @@ def append_to_inventory(bod_obj, conserva_serial):
             AddToSystemJournal(f"State Management Error reading inventory: {e}")
             return
 
-        max_pos = -1
-        for b in inventory:
-            if b.get('pos', -1) > max_pos:
-                max_pos = b['pos']
-
-        bod_obj['pos'] = max_pos + 1
+        bod_obj['pos'] = len(inventory)
         bod_obj['drop_btn'] = 5 + (bod_obj['pos'] * 2)
         bod_obj['page'] = (bod_obj['pos'] // 10) + 1
 
@@ -89,6 +84,8 @@ def reindex_inventory(conserva_serial):
         for new_pos, bod in enumerate(inventory):
             bod['pos']      = new_pos
             bod['drop_btn'] = 5 + (new_pos * 2)
+            # Page is approximate (assumes ~10 items/page). Extraction uses
+            # button-search via _navigate_to_button(), not page numbers.
             bod['page']     = (new_pos // 10) + 1
 
         tmp = inv_file + ".tmp"
@@ -147,6 +144,28 @@ def find_completable_sets(inventory):
             
     return completed_sets
 
+def _navigate_to_button(idx, current_serial, target_btn):
+    """Flips through book pages until target_btn appears in the gump's button list.
+
+    The Scanner stores actual button IDs read from each page's gump, so each
+    button is unique across the entire book.  We just flip until we find it.
+
+    Returns (idx, current_serial, found).
+    """
+    MAX_PAGES = 200  # safety limit (~500 BODs / ~3 per page)
+    for _ in range(MAX_PAGES):
+        g = GetGumpInfo(idx)
+        btn_ids = [b.get('ReturnValue', 0) for b in g.get('GumpButtons', [])]
+        if target_btn in btn_ids:
+            return idx, current_serial, True
+        NumGumpButton(idx, NEXT_PAGE_BTN)
+        idx, current_serial, page_changed = wait_for_gump_serial_change(
+            current_serial, BOOK_GUMP_ID, 8000)
+        if not page_changed:
+            break  # no more pages
+    return idx, current_serial, False
+
+
 def extract_bods(book_serial, target_bods, inventory=None):
     """Performs a single Reverse Sweep extraction using fast Gump Serial polling.
 
@@ -159,11 +178,11 @@ def extract_bods(book_serial, target_bods, inventory=None):
     # Ensure strict descending order so UO's server indexing doesn't shift for earlier drops
     target_bods.sort(key=lambda x: x['pos'], reverse=True)
     extracted_map = {}
-    
+
     for bod in target_bods:
         if check_abort(): break
         world_save_guard()
-        
+
         close_all_gumps()
         # Cancel any lingering target cursor left by crafting tools (scissors/tongs).
         # If TargetPresent() is True, UseObject() is consumed as a target click
@@ -175,7 +194,7 @@ def extract_bods(book_serial, target_bods, inventory=None):
         before_bods = list(GetFoundList())
 
         UseObject(book_serial)
-        
+
         t = time.time()
         idx = -1
         current_serial = 0
@@ -187,25 +206,14 @@ def extract_bods(book_serial, target_bods, inventory=None):
                     current_serial = GetGumpInfo(i)['Serial']
                     break
             if idx != -1: break
-                
+
         if idx != -1:
-            target_page = bod['page']
-            current_page = 1
-            lost_gump = False
-            
-            # Flip to the correct page
-            while current_page < target_page:
-                if check_abort(): return extracted_map
-                NumGumpButton(idx, NEXT_PAGE_BTN)
-                idx, current_serial, page_changed = wait_for_gump_serial_change(current_serial, BOOK_GUMP_ID, 8000)
-                if not page_changed:
-                    lost_gump = True
-                    break
+            # Navigate to the page containing this button by flipping until found
+            idx, current_serial, found = _navigate_to_button(
+                idx, current_serial, bod['drop_btn'])
 
-                current_page += 1
-
-            if lost_gump:
-                AddToSystemJournal(f"Warning: Lost book gump while turning to page {target_page}.")
+            if not found:
+                AddToSystemJournal(f"Warning: Could not find button {bod['drop_btn']} for Pos #{bod['pos']}. Skipping.")
                 continue
 
             Wait(200) # Tiny tick to let UI register before dropping
@@ -236,7 +244,7 @@ def extract_bods(book_serial, target_bods, inventory=None):
                     break
 
                 if attempt == 0:
-                    # First attempt failed — re-open the book to the correct page and retry once
+                    # First attempt failed — re-open the book and search again
                     AddToSystemJournal(f"Retry: Pos #{bod['pos']} drop failed, re-opening book...")
                     close_all_gumps()
                     Wait(300)
@@ -254,29 +262,23 @@ def extract_bods(book_serial, target_bods, inventory=None):
                             break
                     if idx == -1:
                         break  # book didn't reopen — give up
-                    # Navigate back to target_page
-                    current_page = 1
-                    lost_gump = False
-                    while current_page < target_page:
-                        NumGumpButton(idx, NEXT_PAGE_BTN)
-                        idx, current_serial, page_changed = wait_for_gump_serial_change(current_serial, BOOK_GUMP_ID, 8000)
-                        if not page_changed:
-                            lost_gump = True
-                            break
-                        current_page += 1
-                    if lost_gump:
-                        break  # couldn't reach the page on retry — give up
+                    idx, current_serial, found = _navigate_to_button(
+                        idx, current_serial, bod['drop_btn'])
+                    if not found:
+                        break  # couldn't find button on retry — give up
                     Wait(200)
 
             if not extracted:
                 AddToSystemJournal(f"Warning: Pos #{bod['pos']} — drop not confirmed after retry.")
             elif inventory is not None:
-                # Remove the extracted entry from the working inventory, save the
-                # stripped list to disk, then do a full reindex pass so pos/drop_btn/page
-                # are always recalculated from scratch after every drop.
+                # Remove extracted entry, reindex in-place, and save atomically
                 extracted_pos = bod['pos']
                 inventory[:] = [b for b in inventory if b.get('pos') != extracted_pos]
                 with _INV_LOCK:
+                    for new_pos, entry in enumerate(inventory):
+                        entry['pos'] = new_pos
+                        entry['drop_btn'] = 5 + (new_pos * 2)
+                        entry['page'] = 0  # approximate — extraction uses button-search
                     inv_file = get_inventory_file(book_serial)
                     tmp = inv_file + '.tmp'
                     try:
@@ -284,14 +286,7 @@ def extract_bods(book_serial, target_bods, inventory=None):
                             json.dump(inventory, f, indent=4)
                         os.replace(tmp, inv_file)
                     except Exception as e:
-                        AddToSystemJournal(f"State Management Error: save after extraction failed — {e}")
-                # Full reindex: loads the stripped file, renumbers 0..N-1, saves.
-                if reindex_inventory(book_serial):
-                    try:
-                        with open(get_inventory_file(book_serial), 'r') as f:
-                            inventory[:] = json.load(f)
-                    except Exception:
-                        pass
+                        AddToSystemJournal(f"State Management Error: save+reindex failed — {e}")
 
     return extracted_map
 
