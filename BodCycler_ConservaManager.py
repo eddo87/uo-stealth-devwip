@@ -91,14 +91,14 @@ def analyze_and_plan(inventories, book_serials, config, tier1_limit=10, tier2_li
     """
     Cross-references all books. Produces a tier-based reorganization plan.
 
-    Prize-aware tiering:
-      - Only sets whose prize_id is in prize_filter go to Best/Tier 2.
-      - No-prize sets go straight to Overflow.
-      - Excess Smalls -> Consegna, excess Larges -> Scartare.
+    Three tiers — no Consegna/Scartare:
+      - Tier 1 (Best, book[0]): max tier1_limit per item per set, wanted prizes only
+      - Tier 2 (books[1:3]):    max tier2_limit per item per set, wanted prizes only
+      - Overflow (books[3:]):   everything else (unwanted prizes + excess beyond tiers)
 
-    Returns dict with keys: moves, to_consegna, to_scartare, summary.
+    Returns dict with keys: moves, to_overflow, summary.
     """
-    # 1. Merge all BODs, annotate with source book
+    # ── Merge all BODs, annotate with source book ──
     all_bods = []
     for serial, inv in inventories.items():
         for bod in inv:
@@ -106,7 +106,7 @@ def analyze_and_plan(inventories, book_serials, config, tier1_limit=10, tier2_li
             bod_copy["_source"] = serial
             all_bods.append(bod_copy)
 
-    # 2. Group by (category, material, quality, amount) for set matching
+    # ── Group by (category, material, quality, amount) ──
     set_groups = defaultdict(lambda: {"larges": [], "smalls": defaultdict(list)})
 
     for bod in all_bods:
@@ -122,42 +122,29 @@ def analyze_and_plan(inventories, book_serials, config, tier1_limit=10, tier2_li
                     key = (set_name, bod["material"], bod["quality"], bod["amount"])
                     set_groups[key]["smalls"][item_lower].append(bod)
 
-    # 3. Destination books by tier
+    # ── Destination books by tier ──
     tier1_book = book_serials[0] if len(book_serials) >= 1 else None
     tier2_books = book_serials[1:3] if len(book_serials) >= 2 else []
     overflow_books = book_serials[3:] if len(book_serials) >= 4 else []
-    # Fallback: if no overflow books defined, use last available book
-    all_dest_books = book_serials
 
     summary = []
     moves = []          # (bod, from_book, to_book)
-    to_consegna = []    # (bod, from_book)
-    to_scartare = []    # (bod, from_book)
+    to_overflow = []    # (bod, from_book) — goes to overflow books
 
-    def _prefer_in_place(bods, dest_serial):
-        """Sort BODs so those already in dest come first (minimize moves)."""
-        in_dest = [b for b in bods if b["_source"] == dest_serial]
-        others = [b for b in bods if b["_source"] != dest_serial]
-        return in_dest + others
+    def _take(bods, count, dest_book):
+        """Takes `count` BODs, moves to dest_book if not already there. Returns (taken, remaining)."""
+        taken, remaining = bods[:count], bods[count:]
+        for bod in taken:
+            if bod["_source"] != dest_book:
+                moves.append((bod, bod["_source"], dest_book))
+        return taken, remaining
 
-    def _allocate_to_books(bods, dest_books, quota_per_book):
-        """Allocate bods across dest_books. Returns (allocated, remaining)."""
-        allocated = []
-        remaining = list(bods)
-        for db in dest_books:
-            if not remaining:
-                break
-            sorted_b = _prefer_in_place(remaining, db)
-            take = min(quota_per_book, len(sorted_b))
-            for bod in sorted_b[:take]:
-                if bod["_source"] != db:
-                    moves.append((bod, bod["_source"], db))
-                allocated.append(bod)
-            remaining = sorted_b[take:]
-        return allocated, remaining
+    # ── Prize filter ──
+    filter_key = "tailor" if cycle_type == "Tailor" else "smith"
+    enabled_prizes = config.get("prize_filter", {}).get(filter_key, [])
 
     for (cat, mat, qual, amt), group in sorted(set_groups.items()):
-        larges = group["larges"]
+        larges = list(group["larges"])
         smalls_by_item = group["smalls"]
         components = [c.lower() for c in LARGE_COMPONENTS.get(cat, [])]
         if not components:
@@ -167,121 +154,90 @@ def analyze_and_plan(inventories, book_serials, config, tier1_limit=10, tier2_li
         comp_counts = {c: len(smalls_by_item.get(c, [])) for c in components}
         bottleneck_item = min(comp_counts, key=comp_counts.get)
         bottleneck = comp_counts[bottleneck_item]
+        completable = min(large_count, bottleneck)
 
         prize_id = get_prize_number(cat, mat, amt, qual)
-        prize_label = prize_names.get(prize_id, f"Prize #{prize_id}") if prize_id else "No prize"
-        # Use the passed cycle_type (not config's Mode radio which could differ)
-        filter_key = "tailor" if cycle_type == "Tailor" else "smith"
-        enabled_prizes = config.get("prize_filter", {}).get(filter_key, [])
-        has_wanted_prize = prize_id in enabled_prizes if prize_id else False
-        # DEBUG — remove after testing
-        if prize_id and not has_wanted_prize:
-            AddToSystemJournal(f"  DEBUG: prize_id={prize_id} cycle_type={cycle_type} filter_key={filter_key} enabled={enabled_prizes}")
+        prize_label = prize_names.get(prize_id, f"#{prize_id}") if prize_id else "No prize"
+        wanted = (prize_id in enabled_prizes) if prize_id else False
 
-        # Log header
-        tag = "*" if has_wanted_prize else " "
+        tag = "*" if wanted else " "
         summary.append(f"\n{tag} {cat} [{mat} {qual} x{amt}] -> {prize_label}")
-        summary.append(f"  Larges: {large_count} | Bottleneck: {bottleneck_item}={bottleneck}")
+        summary.append(f"  Larges: {large_count} | Completable: {completable} | Bottleneck: {bottleneck_item}={bottleneck}")
         parts_str = ", ".join(f"{c}: {comp_counts[c]}" for c in components)
         summary.append(f"  Parts: {parts_str}")
 
-        # --- Route based on prize filter ---
-        if not has_wanted_prize:
-            # No wanted prize -> all go to Overflow (or Scartare if no overflow books)
-            summary.append(f"  -> No wanted prize: all to Overflow")
-            remaining_l = list(larges)
-            if overflow_books:
-                _, leftover = _allocate_to_books(remaining_l, overflow_books, 999)
-                for bod in leftover:
-                    to_scartare.append((bod, bod["_source"]))
-            else:
-                # No overflow books — keep in any available book, don't scartare prize-less
-                for db in all_dest_books:
-                    remaining_l = [b for b in remaining_l if b["_source"] == db] + \
-                                  [b for b in remaining_l if b["_source"] != db]
+        if not wanted:
+            # ── Unwanted → all to Overflow ──
+            for bod in larges:
+                to_overflow.append((bod, bod["_source"]))
             for comp in components:
-                comp_bods = list(smalls_by_item.get(comp, []))
-                if overflow_books:
-                    _, leftover = _allocate_to_books(comp_bods, overflow_books, 999)
-                    for bod in leftover:
-                        to_consegna.append((bod, bod["_source"]))
+                for bod in smalls_by_item.get(comp, []):
+                    to_overflow.append((bod, bod["_source"]))
+            summary.append(f"  -> Unwanted: all to Overflow")
             continue
 
-        # --- Wanted prize: allocate by tiers ---
-        # Keep count = max(bottleneck, tier1_limit) so we don't trim below what could complete
-        keep = max(bottleneck, tier1_limit)
+        # ── Wanted prize: Tier 1 (max tier1_limit) → Tier 2 (max tier2_limit) → Overflow ──
+        t1_large = min(large_count, tier1_limit)
+        t2_large = min(max(0, large_count - t1_large), tier2_limit)
+        overflow_large = max(0, large_count - t1_large - t2_large)
 
-        # Larges: trim to keep, excess -> Scartare
-        excess_large_count = max(0, large_count - keep - tier2_limit)
         remaining_l = list(larges)
-
-        # Tier 1: Best book
-        if tier1_book:
-            t1_quota = min(len(remaining_l), tier1_limit)
-            sorted_l = _prefer_in_place(remaining_l, tier1_book)
-            for bod in sorted_l[:t1_quota]:
-                if bod["_source"] != tier1_book:
-                    moves.append((bod, bod["_source"], tier1_book))
-            remaining_l = sorted_l[t1_quota:]
-
-        # Tier 2
-        if tier2_books and remaining_l:
-            per_t2 = max(1, tier2_limit // len(tier2_books))
-            _, remaining_l = _allocate_to_books(remaining_l, tier2_books, per_t2)
-
-        # Overflow
-        if overflow_books and remaining_l:
-            _, remaining_l = _allocate_to_books(remaining_l, overflow_books, 999)
-
-        # Anything left -> Scartare
+        if tier1_book and t1_large > 0:
+            _, remaining_l = _take(remaining_l, t1_large, tier1_book)
+        if tier2_books and t2_large > 0:
+            per_t2 = max(1, t2_large // max(1, len(tier2_books)))
+            for tb in tier2_books:
+                if not remaining_l:
+                    break
+                _, remaining_l = _take(remaining_l, min(per_t2, len(remaining_l)), tb)
+        # Anything beyond tier1+tier2 → Overflow
         for bod in remaining_l:
-            to_scartare.append((bod, bod["_source"]))
+            to_overflow.append((bod, bod["_source"]))
 
-        t1l = min(large_count, tier1_limit)
-        t2l = min(max(0, large_count - t1l), tier2_limit)
-        summary.append(f"  Tier 1: {t1l}L | Tier 2: {t2l}L | Scartare: {len(remaining_l)}L")
-
-        # Smalls: same tier allocation per component
+        # ── Smalls: same tier limits per component ──
+        overflow_smalls = 0
         for comp in components:
             comp_bods = list(smalls_by_item.get(comp, []))
+            if not comp_bods:
+                continue
+
+            t1_s = min(len(comp_bods), tier1_limit)
+            t2_s = min(max(0, len(comp_bods) - t1_s), tier2_limit)
+
             remaining_s = list(comp_bods)
-
-            if tier1_book:
-                t1q = min(len(remaining_s), tier1_limit)
-                sorted_s = _prefer_in_place(remaining_s, tier1_book)
-                for bod in sorted_s[:t1q]:
-                    if bod["_source"] != tier1_book:
-                        moves.append((bod, bod["_source"], tier1_book))
-                remaining_s = sorted_s[t1q:]
-
-            if tier2_books and remaining_s:
-                per_t2 = max(1, tier2_limit // len(tier2_books))
-                _, remaining_s = _allocate_to_books(remaining_s, tier2_books, per_t2)
-
-            if overflow_books and remaining_s:
-                _, remaining_s = _allocate_to_books(remaining_s, overflow_books, 999)
-
+            if tier1_book and t1_s > 0:
+                _, remaining_s = _take(remaining_s, t1_s, tier1_book)
+            if tier2_books and t2_s > 0:
+                per_t2 = max(1, t2_s // max(1, len(tier2_books)))
+                for tb in tier2_books:
+                    if not remaining_s:
+                        break
+                    _, remaining_s = _take(remaining_s, min(per_t2, len(remaining_s)), tb)
             for bod in remaining_s:
-                to_consegna.append((bod, bod["_source"]))
+                to_overflow.append((bod, bod["_source"]))
+                overflow_smalls += 1
 
-    # Final summary
+        summary.append(f"  Tier 1: {t1_large}L | Tier 2: {t2_large}L | -> Overflow: {overflow_large}L + {overflow_smalls}S")
+
+    # ── Final summary ──
     move_count = len([m for m in moves if m[1] != m[2]])
+    overflow_count = len(to_overflow)
     summary.append(f"\nPLAN SUMMARY:")
-    summary.append(f"  Cross-book moves: {move_count}")
-    summary.append(f"  Excess Smalls -> Consegna: {len(to_consegna)}")
-    summary.append(f"  Excess Larges -> Scartare: {len(to_scartare)}")
+    summary.append(f"  Cross-book moves (tier rebalance): {move_count}")
+    summary.append(f"  To Overflow: {overflow_count}")
 
     return {
         "moves": moves,
-        "to_consegna": to_consegna,
-        "to_scartare": to_scartare,
+        "to_overflow": to_overflow,
         "summary": summary,
     }
 
 
-def analyze_and_log(config, cycle_type):
-    """Analyze-only mode: loads inventories, runs analysis, logs to journal.
-    Generates a RE template script for fast drops via Gumps.SendAction.
+def analyze_and_log(config, cycle_type, mode="all"):
+    """Analyze + generate RE drops. Mode controls what goes into the drop queue:
+      'all'      — moves + excess (everything)
+      'overflow' — only unwanted-prize moves to overflow books
+      'excess'   — only excess Smalls→Consegna + Larges→Scartare
     """
     book_serials = _get_book_serials(config, cycle_type)
     if not book_serials:
@@ -299,8 +255,16 @@ def analyze_and_log(config, cycle_type):
     for line in plan["summary"]:
         AddToSystemJournal(line)
 
-    # Build the full drop queue and write RE template + drops JSON
-    queue = _build_drop_queue(plan, config)
+    # Filter plan by mode before building drop queue
+    filtered_plan = dict(plan)
+    if mode == "overflow":
+        # Only overflow moves (unwanted prizes + excess beyond tiers)
+        filtered_plan["moves"] = []  # no tier rebalancing
+        AddToSystemJournal(f"  Mode: OVERFLOW ONLY — {len(filtered_plan['to_overflow'])} BODs to move")
+    elif mode == "all":
+        AddToSystemJournal(f"  Mode: ALL — {len(filtered_plan['moves'])} tier moves + {len(filtered_plan['to_overflow'])} overflow")
+
+    queue = _build_drop_queue(filtered_plan, config)
     _save_drop_queue(queue, cycle_type)
     if queue:
         write_re_template_and_queue(config, cycle_type)
@@ -327,11 +291,21 @@ def _build_drop_queue(plan, config):
     Returns list of dicts: [{book_serial, pos, drop_btn, dest_serial, dest_type, bod_info}]
     Grouped by source book, each group sorted descending by pos.
     """
-    consegna = config.get("books", {}).get("Consegna", 0)
-    scartare = config.get("books", {}).get("Scartare", 0)
+    # Get overflow book serials from config (books at index 3+)
+    key = "conserva_books_tailor"  # default
+    for k in ("conserva_books_tailor", "conserva_books_smith"):
+        if config.get(k):
+            full_list = config.get(k, [])
+            overflow_serials = [s for i, s in enumerate(full_list) if i >= 3 and s != 0]
+            if overflow_serials:
+                break
+    else:
+        overflow_serials = []
+    overflow_dest = overflow_serials[0] if overflow_serials else 0
 
     by_book = defaultdict(list)
 
+    # Tier rebalance moves (between Best/Tier2 books)
     for bod, from_book, to_book in plan.get("moves", []):
         if from_book != to_book:
             by_book[from_book].append({
@@ -340,20 +314,16 @@ def _build_drop_queue(plan, config):
                         "material": bod["material"], "quality": bod["quality"],
                         "amount": bod["amount"], "category": bod.get("category", "")},
             })
-    for bod, from_book in plan.get("to_consegna", []):
-        by_book[from_book].append({
-            "pos": bod["pos"], "dest": consegna, "dest_type": "consegna",
-            "bod": {"type": bod["type"], "item": bod["item"],
-                    "material": bod["material"], "quality": bod["quality"],
-                    "amount": bod["amount"], "category": bod.get("category", "")},
-        })
-    for bod, from_book in plan.get("to_scartare", []):
-        by_book[from_book].append({
-            "pos": bod["pos"], "dest": scartare, "dest_type": "scartare",
-            "bod": {"type": bod["type"], "item": bod["item"],
-                    "material": bod["material"], "quality": bod["quality"],
-                    "amount": bod["amount"], "category": bod.get("category", "")},
-        })
+
+    # Overflow moves (unwanted prizes + excess beyond tiers → overflow book)
+    for bod, from_book in plan.get("to_overflow", []):
+        if overflow_dest and from_book != overflow_dest:
+            by_book[from_book].append({
+                "pos": bod["pos"], "dest": overflow_dest, "dest_type": "book",
+                "bod": {"type": bod["type"], "item": bod["item"],
+                        "material": bod["material"], "quality": bod["quality"],
+                        "amount": bod["amount"], "category": bod.get("category", "")},
+            })
 
     # Flatten: process books in config order, each sorted descending
     queue = []
@@ -549,8 +519,7 @@ def route_dropped_bods(config, cycle_type):
 
     AddToSystemJournal(f"Routing {len(loose_bods)} BODs from backpack...")
 
-    # Build destination counts from the plan
-    # We route in order: scartare first, then consegna, then books
+    # Build destination counts from the plan (all destinations are books)
     dest_groups = defaultdict(lambda: {"serial": 0, "count": 0})
     for entry in plan_entries:
         dt = entry["dest_type"]

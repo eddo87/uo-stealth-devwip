@@ -379,6 +379,7 @@ def get_craft_info(item_name, cycle_type="Tailor"):
 
 
 def check_and_pull_materials(material, qty_to_craft, item_cost, crate_serial, cycle_type="Tailor"):
+    material = material.lower()
     if material not in MATERIAL_MAP:
         return False
 
@@ -803,7 +804,7 @@ def run_crafting_cycle():
                 close_all_gumps()
                 continue
 
-            mat_btn = MATERIAL_MAP[info['material']]['btn']
+            mat_btn = MATERIAL_MAP[info['material'].lower()]['btn']
             success = craft_items_until_done(bod, tool_type, cat_identifier, item_identifier, info['item_name'], item_id, info['qty_needed'], info['is_except'], mat_btn)
             close_all_gumps()
 

@@ -277,13 +277,22 @@ class BodCyclerGUI(threading.Thread):
                 self.set_global_status("Error (See Journal)")
         threading.Thread(target=_run, daemon=True).start()
 
+    def trigger_conserva_analyze_overflow(self):
+        self.save_config()
+        def _run():
+            try:
+                import importlib, BodCycler_ConservaManager as cm; importlib.reload(cm)
+                cycle = "Tailor" if self.vars["trim_tailor"].get() else "Smith"
+                cm.analyze_and_log(self.config, cycle, mode="overflow")
+            except Exception as e:
+                AddToSystemJournal(f"Conserva Overflow error: {e}")
+        threading.Thread(target=_run, daemon=True).start()
+
     def trigger_conserva_analyze(self):
         self.save_config()
         def _run():
             try:
-                import importlib
                 import importlib, BodCycler_ConservaManager as cm; importlib.reload(cm)
-                importlib.reload(cm)
                 if self.vars["trim_tailor"].get():
                     cm.analyze_and_log(self.config, "Tailor")
                 if self.vars["trim_smith"].get():
@@ -878,9 +887,10 @@ class BodCyclerGUI(threading.Thread):
         # Row 1: Action buttons (left) + Conserva Crate target (right)
         f_top6 = Frame(t6, bg=BG)
         f_top6.pack(fill="x", pady=(0, 4))
-        _btn(f_top6, "Scan All",     self.trigger_conserva_scan,      "#FFB6C1").pack(side=LEFT, padx=2)
-        _btn(f_top6, "Analyze",      self.trigger_conserva_analyze,  "#B0E0E6").pack(side=LEFT, padx=2)
-        _btn(f_top6, "Route Drops",  self.trigger_conserva_trim,     "#90EE90").pack(side=LEFT, padx=2)
+        _btn(f_top6, "Scan All",       self.trigger_conserva_scan,             "#FFB6C1").pack(side=LEFT, padx=2)
+        _btn(f_top6, "Analyze All",   self.trigger_conserva_analyze,         "#B0E0E6").pack(side=LEFT, padx=2)
+        _btn(f_top6, "Move Overflow", self.trigger_conserva_analyze_overflow, "#E8D0FF").pack(side=LEFT, padx=2)
+        _btn(f_top6, "Route Drops",   self.trigger_conserva_trim,            "#90EE90").pack(side=LEFT, padx=2)
 
         # Row 2: Set assembly flow
         f_sets6 = Frame(t6, bg=BG)
