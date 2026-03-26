@@ -122,6 +122,15 @@ def sort_new_bods(config):
     conserva_serial = config.get("books", {}).get("Conserva", 0)
     scartare_serial = config.get("books", {}).get("Scartare", 0)
     riprova_serial  = config.get("books", {}).get("Riprova", 0)
+
+    # Auto-swap Scartare if nearly full (>=480 BODs)
+    bbcrate = config.get("containers", {}).get("BodBookCrate", 0)
+    cycle_type = config.get("cycle_type", "Tailor")
+    if bbcrate and scartare_serial:
+        from BodCycler_Crafting import _swap_full_book
+        new_scartare = _swap_full_book(bbcrate, scartare_serial, cycle_type, config, "Scartare")
+        if new_scartare != scartare_serial:
+            scartare_serial = new_scartare
     cycle_type      = config.get("cycle_type", "Tailor")
 
     bod_color = BOD_SMITH_COLOR if cycle_type == "Smith" else BOD_TAILOR_COLOR

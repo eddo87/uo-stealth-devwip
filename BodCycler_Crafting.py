@@ -153,6 +153,67 @@ def _parse_book_count(tooltip: str) -> int:
     return -1
 
 
+def _swap_full_book(bbcrate, book_serial, cycle_type, config=None, config_key=None):
+    """Swaps a full book (e.g. Scartare at 480+) with an empty one from BodBookCrate.
+    Looks for a book named 'tailor'/'black' with 0 BODs.
+    Persists the new serial to config if config and config_key are provided.
+    Returns new book serial, or the original if no swap happened.
+    """
+    if not bbcrate or not book_serial:
+        return book_serial
+
+    tooltip = GetTooltip(book_serial).lower()
+    count = _parse_book_count(tooltip)
+    if count < 480:
+        return book_serial
+
+    AddToSystemJournal(f"Book {hex(book_serial)} is near full ({count}/500). Swapping from crate...")
+    UseObject(bbcrate)
+    Wait(400)
+
+    # Put full book in crate
+    MoveItem(book_serial, 1, bbcrate, 0, 0, 0)
+    Wait(600)
+
+    # Find an empty book (0 BODs) of the right type
+    book_keyword = "tailor" if cycle_type == "Tailor" else "black"
+    FindType(BOD_BOOK_TYPE, bbcrate)
+    all_books = list(GetFoundList())
+
+    for book in all_books:
+        if book == book_serial:
+            continue
+        tip = GetTooltip(book).lower()
+        if book_keyword not in tip:
+            continue
+        bcount = _parse_book_count(tip)
+        if bcount == 0:
+            AddToSystemJournal(f"  Found empty book {hex(book)}. Swapping.")
+            MoveItem(book, 1, Backpack(), 0, 0, 0)
+            Wait(600)
+            # Persist to config
+            if config and config_key:
+                config["books"][config_key] = book
+                try:
+                    import json as _json
+                    with open(CONFIG_FILE, "r") as f:
+                        disk_config = _json.load(f)
+                    disk_config["books"][config_key] = book
+                    with open(CONFIG_FILE, "w") as f:
+                        _json.dump(disk_config, f, indent=4)
+                    AddToSystemJournal(f"  Config updated: books.{config_key} = {hex(book)}")
+                except Exception as e:
+                    AddToSystemJournal(f"  WARNING: Could not persist config — {e}")
+            return book
+        Wait(50)
+
+    # No empty book found — take the full book back
+    AddToSystemJournal("  No empty book found in crate. Taking full book back.")
+    MoveItem(book_serial, 1, Backpack(), 0, 0, 0)
+    Wait(600)
+    return book_serial
+
+
 def _refill_origine_from_book_crate(bbcrate, origine, cycle_type):
     """
     Scans BodBookCrate for a BodBook matching the current cycle type with > 50 BODs.
@@ -719,6 +780,11 @@ def run_crafting_cycle():
         if _tb and _tb.should_collect_bods():
             AddToSystemJournal("BOD collection window opened mid-cycle — stopping early for collectors.")
             break
+
+        # Swap Scartare if nearly full (>=480 BODs)
+        new_scartare = _swap_full_book(bbcrate, scartare, cycle_type, config, "Scartare")
+        if new_scartare != scartare:
+            scartare = new_scartare
 
         close_all_gumps()
         consolidate_materials(crate) 
