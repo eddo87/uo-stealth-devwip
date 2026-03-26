@@ -1,0 +1,11 @@
+[package]
+name = "uo_packet_injector"
+version = "0.1.0"
+edition = "2021"
+description = "DLL injected into UO Stealth to send raw UO packets bypassing client-side validation"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+once_cell = "1.19"

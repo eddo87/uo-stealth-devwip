@@ -81,7 +81,7 @@ DEFAULT_CONFIG = {
     },
     "conserva_books_tailor": [0, 0, 0, 0, 0],
     "conserva_books_smith":  [0, 0, 0, 0, 0],
-    "conserva_manager": {"keep_tier1": 10, "keep_tier2": 20},
+    "conserva_manager": {"keep_tier1": 8, "keep_tier2": 20},
     "travel": {
         "RuneBook": 0, "Method": "Recall",
         "Runes": {
@@ -138,7 +138,8 @@ class BodCyclerGUI(threading.Thread):
         if "collector_profiles" not in self.config["bots"]: self.config["bots"]["collector_profiles"] = ["ed2", "ed3", "ed5"]
         if "conserva_books_tailor" not in self.config: self.config["conserva_books_tailor"] = [0, 0, 0, 0, 0]
         if "conserva_books_smith" not in self.config: self.config["conserva_books_smith"] = [0, 0, 0, 0, 0]
-        if "conserva_manager" not in self.config: self.config["conserva_manager"] = {"keep_tier1": 10, "keep_tier2": 20}
+        if "conserva_manager" not in self.config: self.config["conserva_manager"] = {"keep_tier1": 8, "keep_tier2": 20}
+        if self.config.get("conserva_manager", {}).get("keep_tier1") == 10: self.config["conserva_manager"]["keep_tier1"] = 8
 
     def save_config(self):
         for name, var in self.vars.items():
@@ -277,15 +278,19 @@ class BodCyclerGUI(threading.Thread):
                 self.set_global_status("Error (See Journal)")
         threading.Thread(target=_run, daemon=True).start()
 
-    def trigger_conserva_analyze_overflow(self):
+    def trigger_conserva_pull_prizes(self):
+        """One-way: pull wanted prizes FROM overflow/later slots INTO Best/Tier2. Never pushes out."""
         self.save_config()
+        self.set_global_status("Pulling prizes...")
         def _run():
             try:
                 import importlib, BodCycler_ConservaManager as cm; importlib.reload(cm)
                 cycle = "Tailor" if self.vars["trim_tailor"].get() else "Smith"
-                cm.analyze_and_log(self.config, cycle, mode="overflow")
+                cm.execute_trim(self.config, cycle, mode="pull_prizes")
+                self.set_global_status("Idle")
             except Exception as e:
-                AddToSystemJournal(f"Conserva Overflow error: {e}")
+                AddToSystemJournal(f"Pull Prizes error: {e}")
+                self.set_global_status("Error (See Journal)")
         threading.Thread(target=_run, daemon=True).start()
 
     def trigger_conserva_analyze(self):
@@ -330,42 +335,80 @@ class BodCyclerGUI(threading.Thread):
         threading.Thread(target=_run, daemon=True).start()
 
     def trigger_conserva_next_set(self):
-        """Prepares RE drops for the next completable set. Respects last check mode."""
+        """DLL extract + combine + route to Consegna in one click."""
         self.save_config()
+        self.set_global_status("Combining set...")
         overflow = getattr(self, '_conserva_overflow_mode', False)
         def _run():
             try:
                 import importlib, BodCycler_ConservaManager as cm; importlib.reload(cm)
                 cycle = "Tailor" if self.vars["trim_tailor"].get() else "Smith"
                 cm.extract_and_combine_next_set(self.config, cycle, overflow_only=overflow)
-            except Exception as e:
-                AddToSystemJournal(f"Conserva Next Set error: {e}")
-        threading.Thread(target=_run, daemon=True).start()
-
-    def trigger_conserva_combine(self):
-        """After CTRL+K dropped 1 set, combines Large+Smalls and routes to Consegna."""
-        self.save_config()
-        self.set_global_status("Combining set...")
-        def _run():
-            try:
-                import importlib, BodCycler_ConservaManager as cm; importlib.reload(cm)
-                cycle = "Tailor" if self.vars["trim_tailor"].get() else "Smith"
-                cm.assemble_dropped_set(self.config, cycle)
                 self.set_global_status("Idle")
             except Exception as e:
                 AddToSystemJournal(f"Conserva Combine error: {e}")
                 self.set_global_status("Error (See Journal)")
         threading.Thread(target=_run, daemon=True).start()
 
-    def trigger_conserva_trim(self):
-        """Called after CTRL+K finishes dropping BODs. Routes them and preps next batch."""
+    def _target_quick_scan_book(self):
+        ClientPrintEx(Self(), 1, 1, "Target a BOD book to scan...")
+        ClientRequestObjectTarget()
+        start = time.time()
+        while not ClientTargetResponsePresent():
+            time.sleep(0.1)
+            if time.time() - start > 15:
+                return
+        response = ClientTargetResponse()
+        if response["ID"] > 0:
+            self._quick_scan_serial = response["ID"]
+            self._qs_label.config(text=f"Scan Book: {hex(self._quick_scan_serial)}", fg="navy")
+
+    def _clear_quick_scan_book(self):
+        self._quick_scan_serial = 0
+        self._qs_label.config(text="Scan Book: Not Set", fg="#888")
+
+    def trigger_fill_backpack_bod(self):
+        """Fills 1 unfilled Small BOD in backpack. Auto-combines if Large is present."""
         self.save_config()
-        self.set_global_status("Routing drops...")
+        self.set_global_status("Filling BOD...")
         def _run():
             try:
                 import importlib, BodCycler_ConservaManager as cm; importlib.reload(cm)
                 cycle = "Tailor" if self.vars["trim_tailor"].get() else "Smith"
-                cm.route_dropped_bods(self.config, cycle)
+                cm.fill_next_backpack_bod(self.config, cycle)
+                self.set_global_status("Idle")
+            except Exception as e:
+                AddToSystemJournal(f"Fill BOD error: {e}")
+                self.set_global_status("Error (See Journal)")
+        threading.Thread(target=_run, daemon=True).start()
+
+    def trigger_conserva_quick_scan(self):
+        serial = getattr(self, '_quick_scan_serial', 0)
+        if not serial:
+            AddToSystemJournal("Quick Scan: No book targeted. Click Target first.")
+            return
+        self.save_config()
+        self.set_global_status("Quick scanning...")
+        def _run():
+            try:
+                import importlib, BodCycler_ConservaManager as cm; importlib.reload(cm)
+                cycle = "Tailor" if self.vars["trim_tailor"].get() else "Smith"
+                cm.quick_scan_report(self.config, cycle, book_serial=serial)
+                self.set_global_status("Idle")
+            except Exception as e:
+                AddToSystemJournal(f"Quick Scan error: {e}")
+                self.set_global_status("Error (See Journal)")
+        threading.Thread(target=_run, daemon=True).start()
+
+    def trigger_conserva_trim(self):
+        """DLL-based: analyze + extract + route in one go."""
+        self.save_config()
+        self.set_global_status("Executing trim...")
+        def _run():
+            try:
+                import importlib, BodCycler_ConservaManager as cm; importlib.reload(cm)
+                cycle = "Tailor" if self.vars["trim_tailor"].get() else "Smith"
+                cm.execute_trim(self.config, cycle, mode="all")
                 self.set_global_status("Idle")
             except Exception as e:
                 AddToSystemJournal(f"Conserva Route error: {e}")
@@ -887,18 +930,32 @@ class BodCyclerGUI(threading.Thread):
         # Row 1: Action buttons (left) + Conserva Crate target (right)
         f_top6 = Frame(t6, bg=BG)
         f_top6.pack(fill="x", pady=(0, 4))
-        _btn(f_top6, "Scan All",       self.trigger_conserva_scan,             "#FFB6C1").pack(side=LEFT, padx=2)
-        _btn(f_top6, "Analyze All",   self.trigger_conserva_analyze,         "#B0E0E6").pack(side=LEFT, padx=2)
-        _btn(f_top6, "Move Overflow", self.trigger_conserva_analyze_overflow, "#E8D0FF").pack(side=LEFT, padx=2)
-        _btn(f_top6, "Route Drops",   self.trigger_conserva_trim,            "#90EE90").pack(side=LEFT, padx=2)
+        _btn(f_top6, "Scan All",      self.trigger_conserva_scan,              "#FFB6C1").pack(side=LEFT, padx=2)
+        _btn(f_top6, "Analyze",      self.trigger_conserva_analyze,          "#B0E0E6").pack(side=LEFT, padx=2)
+        _btn(f_top6, "Pull Prizes",  self.trigger_conserva_pull_prizes,      "#E8D0FF").pack(side=LEFT, padx=2)
+        _btn(f_top6, "Trim All",     self.trigger_conserva_trim,             "#90EE90").pack(side=LEFT, padx=2)
 
-        # Row 2: Set assembly flow
+        # Row 2: Set assembly + quick scan
         f_sets6 = Frame(t6, bg=BG)
         f_sets6.pack(fill="x", pady=(0, 4))
-        _btn(f_sets6, "Check Sets",    self.trigger_conserva_check,          "#DDA0DD").pack(side=LEFT, padx=2)
-        _btn(f_sets6, "Overflow Sets", self.trigger_conserva_check_overflow, "#E8D0FF").pack(side=LEFT, padx=2)
-        _btn(f_sets6, "Next Set",      self.trigger_conserva_next_set,       "#FFD700").pack(side=LEFT, padx=2)
-        _btn(f_sets6, "Combine Set",   self.trigger_conserva_combine,        "#90EE90").pack(side=LEFT, padx=2)
+        _btn(f_sets6, "Check Sets",  self.trigger_conserva_check,    "#DDA0DD").pack(side=LEFT, padx=2)
+        _btn(f_sets6, "Combine Set", self.trigger_conserva_next_set, "#FFD700").pack(side=LEFT, padx=2)
+        _btn(f_sets6, "Fill BOD",    self.trigger_fill_backpack_bod, "#98FB98").pack(side=LEFT, padx=2)
+        # Quick scan: target a book + scan it for prizes/filled BODs
+        Label(f_sets6, text="  ", bg=BG).pack(side=LEFT)  # spacer
+        self._quick_scan_serial = 0
+        qs_text = "Scan Book: Not Set"
+        self._qs_label = _lbl(f_sets6, qs_text, fg="#888", width=18, anchor="w")
+        self._qs_label.pack(side=LEFT)
+        _btn(f_sets6, "Target",
+             lambda: self._target_quick_scan_book(),
+             width=6).pack(side=LEFT, padx=2)
+        _btn(f_sets6, "X",
+             lambda: self._clear_quick_scan_book(),
+             width=2, bg="#FFAAAA").pack(side=LEFT, padx=1)
+        _btn(f_sets6, "Scan",
+             self.trigger_conserva_quick_scan, "#FFE4B5",
+             width=5).pack(side=LEFT, padx=2)
         cc_serial = self.config["containers"].get("ConservaCrate", 0)
         cc_text = f"Crate: {hex(cc_serial)}" if cc_serial else "Crate: Not Set"
         cc_fg = "navy" if cc_serial else "red"

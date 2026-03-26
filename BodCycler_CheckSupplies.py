@@ -153,10 +153,12 @@ def text_in_gump(text: str, button_id: int = None, timeout: int = 10, gump_id: i
     return False
 
 def restock_ingots(backpack_id, crate_id, min_amount=50):
-    current = get_item_count(INGOT_TYPE, backpack_id, 0)
+    current = get_item_count(INGOT_TYPE, backpack_id, 0x0000)
     if current < min_amount:
-        AddToSystemJournal(f"Restocking Ingots... (Have {current})")
-        ingots_crate_item = find_item_in_container(INGOT_TYPE, crate_id)
+        AddToSystemJournal(f"Restocking Iron Ingots... (Have {current})")
+        # Must use color 0x0000 to grab ONLY iron ingots, not colored ore
+        FindTypeEx(INGOT_TYPE, 0x0000, crate_id, False)
+        ingots_crate_item = FindItem() if FindCount() > 0 else 0
         if ingots_crate_item:
             world_save_guard()
             MoveItem(ingots_crate_item, 300, backpack_id, 0, 0, 0)

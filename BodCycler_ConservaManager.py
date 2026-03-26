@@ -87,7 +87,7 @@ def load_all_inventories(book_serials):
     return result
 
 
-def analyze_and_plan(inventories, book_serials, config, tier1_limit=10, tier2_limit=20, cycle_type="Tailor"):
+def analyze_and_plan(inventories, book_serials, config, tier1_limit=8, tier2_limit=20, cycle_type="Tailor"):
     """
     Cross-references all books. Produces a tier-based reorganization plan.
 
@@ -132,8 +132,14 @@ def analyze_and_plan(inventories, book_serials, config, tier1_limit=10, tier2_li
     to_overflow = []    # (bod, from_book) — goes to overflow books
 
     def _take(bods, count, dest_book):
-        """Takes `count` BODs, moves to dest_book if not already there. Returns (taken, remaining)."""
-        taken, remaining = bods[:count], bods[count:]
+        """Takes `count` BODs for dest_book, preferring ones already there.
+        Returns (taken, remaining). Generates moves for BODs coming from other books.
+        """
+        # Sort: BODs already in dest first (minimize moves), others after
+        in_dest = [b for b in bods if b["_source"] == dest_book]
+        others = [b for b in bods if b["_source"] != dest_book]
+        sorted_bods = in_dest + others
+        taken, remaining = sorted_bods[:count], sorted_bods[count:]
         for bod in taken:
             if bod["_source"] != dest_book:
                 moves.append((bod, bod["_source"], dest_book))
@@ -234,10 +240,9 @@ def analyze_and_plan(inventories, book_serials, config, tier1_limit=10, tier2_li
 
 
 def analyze_and_log(config, cycle_type, mode="all"):
-    """Analyze + generate RE drops. Mode controls what goes into the drop queue:
-      'all'      — moves + excess (everything)
-      'overflow' — only unwanted-prize moves to overflow books
-      'excess'   — only excess Smalls→Consegna + Larges→Scartare
+    """Analyze all Conserva books. Mode controls what gets executed:
+      'all'      — tier rebalancing + overflow moves
+      'overflow' — only overflow moves (unwanted + excess → overflow books)
     """
     book_serials = _get_book_serials(config, cycle_type)
     if not book_serials:
@@ -246,7 +251,7 @@ def analyze_and_log(config, cycle_type, mode="all"):
 
     inventories = load_all_inventories(book_serials)
     total_bods = sum(len(inv) for inv in inventories.values())
-    tier1 = config.get("conserva_manager", {}).get("keep_tier1", 10)
+    tier1 = config.get("conserva_manager", {}).get("keep_tier1", 8)
     tier2 = config.get("conserva_manager", {}).get("keep_tier2", 20)
 
     AddToSystemJournal(f"=== CONSERVA ANALYZE: {len(book_serials)} {cycle_type} books ({total_bods} BODs) ===")
@@ -255,323 +260,512 @@ def analyze_and_log(config, cycle_type, mode="all"):
     for line in plan["summary"]:
         AddToSystemJournal(line)
 
-    # Filter plan by mode before building drop queue
-    filtered_plan = dict(plan)
-    if mode == "overflow":
-        # Only overflow moves (unwanted prizes + excess beyond tiers)
-        filtered_plan["moves"] = []  # no tier rebalancing
-        AddToSystemJournal(f"  Mode: OVERFLOW ONLY — {len(filtered_plan['to_overflow'])} BODs to move")
-    elif mode == "all":
-        AddToSystemJournal(f"  Mode: ALL — {len(filtered_plan['moves'])} tier moves + {len(filtered_plan['to_overflow'])} overflow")
-
-    queue = _build_drop_queue(filtered_plan, config)
-    _save_drop_queue(queue, cycle_type)
-    if queue:
-        write_re_template_and_queue(config, cycle_type)
-
-    AddToSystemJournal("=== ANALYZE COMPLETE (no changes made) ===")
+    AddToSystemJournal("=== ANALYZE COMPLETE ===")
     return plan
 
 
 # ---------------------------------------------------------------------------
-# RE Template System
+# DLL-based Execution — extract + route via raw packet injection
 # ---------------------------------------------------------------------------
 
-RE_TEMPLATE_PATH = None  # set lazily on first use
-BATCH_SIZE = 50          # max drops per RE run (backpack safety)
+BATCH_SIZE = 40  # max drops before routing to destination (backpack safety)
 
 
-def _get_re_template_path():
-    """Fixed path for the RE template script that CTRL+K triggers."""
-    return f"{StealthPath()}Scripts\\conserva_drop_template.py"
+def _get_overflow_dest(config, cycle_type):
+    """Returns the first overflow book serial (index 3+)."""
+    key = "conserva_books_tailor" if cycle_type == "Tailor" else "conserva_books_smith"
+    full_list = config.get(key, [])
+    for i, s in enumerate(full_list):
+        if i >= 3 and s != 0:
+            return s
+    return 0
 
 
-def _build_drop_queue(plan, config):
-    """Builds the full ordered drop queue from a plan.
-    Returns list of dicts: [{book_serial, pos, drop_btn, dest_serial, dest_type, bod_info}]
-    Grouped by source book, each group sorted descending by pos.
+def _ensure_bridge():
+    """Connects to the DLL packet bridge. Returns True if ready."""
+    try:
+        import BodCycler_PacketBridge as pb
+        if not pb.is_connected():
+            if not pb.connect():
+                AddToSystemJournal("PacketBridge: Cannot connect. Is DLL injected? (python inject_dll.py)")
+                return False
+        st = pb.status()
+        if not st.get("captured"):
+            AddToSystemJournal("PacketBridge: Socket not captured. Run socket scan first.")
+            return False
+        return True
+    except ImportError:
+        AddToSystemJournal("PacketBridge: Module not found.")
+        return False
+
+
+def _dll_extract_batch(book_serial, positions):
+    """Extracts BODs from a book using DLL packet injection.
+    Book must be in backpack. Opens it, injects 0xB1 per position (descending),
+    waits for serial refresh between each drop.
+    Returns list of extracted BOD serials in backpack.
     """
-    # Get overflow book serials from config (books at index 3+)
-    key = "conserva_books_tailor"  # default
-    for k in ("conserva_books_tailor", "conserva_books_smith"):
-        if config.get(k):
-            full_list = config.get(k, [])
-            overflow_serials = [s for i, s in enumerate(full_list) if i >= 3 and s != 0]
-            if overflow_serials:
-                break
-    else:
-        overflow_serials = []
-    overflow_dest = overflow_serials[0] if overflow_serials else 0
+    import BodCycler_PacketBridge as pb
 
-    by_book = defaultdict(list)
+    close_all_gumps()
+    UseObject(book_serial)
+    Wait(2000)
 
-    # Tier rebalance moves (between Best/Tier2 books)
-    for bod, from_book, to_book in plan.get("moves", []):
-        if from_book != to_book:
-            by_book[from_book].append({
-                "pos": bod["pos"], "dest": to_book, "dest_type": "book",
-                "bod": {"type": bod["type"], "item": bod["item"],
-                        "material": bod["material"], "quality": bod["quality"],
-                        "amount": bod["amount"], "category": bod.get("category", "")},
-            })
-
-    # Overflow moves (unwanted prizes + excess beyond tiers → overflow book)
-    for bod, from_book in plan.get("to_overflow", []):
-        if overflow_dest and from_book != overflow_dest:
-            by_book[from_book].append({
-                "pos": bod["pos"], "dest": overflow_dest, "dest_type": "book",
-                "bod": {"type": bod["type"], "item": bod["item"],
-                        "material": bod["material"], "quality": bod["quality"],
-                        "amount": bod["amount"], "category": bod.get("category", "")},
-            })
-
-    # Flatten: process books in config order, each sorted descending
-    queue = []
-    for book_serial in by_book:
-        entries = by_book[book_serial]
-        entries.sort(key=lambda e: e["pos"], reverse=True)
-        for e in entries:
-            e["book_serial"] = book_serial
-            e["drop_btn"] = 5 + (e["pos"] * 2)
-            queue.append(e)
-
-    return queue
-
-
-def _save_drop_queue(queue, cycle_type):
-    """Saves the full drop queue to a JSON file for batch consumption."""
-    queue_file = f"{StealthPath()}Scripts\\{CharName()}_conserva_queue_{cycle_type.lower()}.json"
-    try:
-        with open(queue_file, "w") as f:
-            json.dump(queue, f, indent=2)
-        AddToSystemJournal(f"Drop queue saved: {len(queue)} total drops -> {queue_file}")
-    except Exception as e:
-        AddToSystemJournal(f"Failed to save drop queue: {e}")
-
-
-def _load_drop_queue(cycle_type):
-    """Loads the drop queue from disk."""
-    queue_file = f"{StealthPath()}Scripts\\{CharName()}_conserva_queue_{cycle_type.lower()}.json"
-    if not os.path.exists(queue_file):
-        return []
-    try:
-        with open(queue_file, "r") as f:
-            return json.load(f)
-    except Exception:
+    idx = -1
+    for i in range(GetGumpsCount()):
+        if GetGumpID(i) == BOOK_GUMP_ID:
+            idx = i
+            break
+    if idx == -1:
+        AddToSystemJournal(f"  Failed to open book {hex(book_serial)}")
         return []
 
-
-def _get_active_batch_path(cycle_type):
-    """Path to the current batch routing info (what was dropped and where it goes)."""
-    return f"{StealthPath()}Scripts\\{CharName()}_conserva_batch_{cycle_type.lower()}.json"
-
-
-def _get_re_drops_path():
-    """JSON file that the RE template reads all drop buttons from."""
-    return f"{StealthPath()}Scripts\\conserva_drops.json"
-
-
-def write_re_template_and_queue(config, cycle_type):
-    """Writes the static RE template + the drops JSON it reads from.
-    The RE script reads conserva_drops.json, processes up to 50 at a time,
-    then shows a message to press the Stealth route button.
-    Returns total drops queued, or 0 if empty.
-    """
-    queue = _load_drop_queue(cycle_type)
-    if not queue:
-        AddToSystemJournal("Conserva Manager: Drop queue is empty. Run Analyze first.")
-        return 0
-
-    # Group by source book, each sorted descending
-    books_order = []
-    by_book = defaultdict(list)
-    for entry in queue:
-        bs = entry["book_serial"]
-        if bs not in by_book:
-            books_order.append(bs)
-        by_book[bs].append(entry)
-
-    # Build the drops JSON: list of {book, drops: [btn, btn, ...], batch_size}
-    drops_data = []
-    for bs in books_order:
-        entries = by_book[bs]
-        entries.sort(key=lambda e: e["pos"], reverse=True)
-        drop_btns = [e["drop_btn"] for e in entries]
-        drops_data.append({
-            "book": bs,
-            "book_hex": hex(bs),
-            "drops": drop_btns,
-        })
-
-    # Write the drops JSON
-    drops_path = _get_re_drops_path()
-    try:
-        with open(drops_path, "w") as f:
-            json.dump(drops_data, f, indent=2)
-    except Exception as e:
-        AddToSystemJournal(f"Failed to write drops JSON: {e}")
-        return 0
-
-    # Save full batch routing info (for route_dropped_bods to use)
-    batch_path = _get_active_batch_path(cycle_type)
-    try:
-        with open(batch_path, "w") as f:
-            json.dump(queue, f, indent=2)
-    except Exception:
-        pass
-
-    # Write the static RE template (reads from conserva_drops.json)
-    template_path = _get_re_template_path()
-    # RE uses IronPython — json module available, os.path for file reading
-    lines = [
-        "# ConservaManager RE Drop Template",
-        "# Reads conserva_drops.json, processes 50 drops per book at a time.",
-        "# After each batch: route in Stealth, then press CTRL+K again.",
-        "",
-        "import json",
-        "import os",
-        "",
-        f"GUMP_ID = {hex(BOOK_GUMP_ID)}",
-        "PAUSE = 100",
-        "BATCH = 50",
-        "",
-        "# Read drops file",
-        f"drops_file = os.path.join(r'{StealthPath()}Scripts', 'conserva_drops.json')",
-        "if not os.path.exists(drops_file):",
-        "    Misc.SendMessage('No conserva_drops.json found. Run Analyze in Stealth first.')",
-        "else:",
-        "    with open(drops_file, 'r') as f:",
-        "        all_books = json.load(f)",
-        "",
-        "    if not all_books:",
-        "        Misc.SendMessage('All drops complete!')",
-        "    else:",
-        "        book_data = all_books[0]",
-        "        book_serial = book_data['book']",
-        "        all_drops = book_data['drops']",
-        "        batch = all_drops[:BATCH]",
-        "        remaining = all_drops[BATCH:]",
-        "",
-        "        Misc.SendMessage('Opening book {} — dropping {}/{} BODs'.format(",
-        "            book_data['book_hex'], len(batch), len(all_drops)))",
-        "",
-        "        Items.UseItem(book_serial)",
-        "        Misc.Pause(2000)",
-        "",
-        "        dropped = 0",
-        "        for btn in batch:",
-        "            Gumps.WaitForGump(GUMP_ID, 10000)",
-        "            Gumps.SendAction(GUMP_ID, btn)",
-        "            Misc.Pause(PAUSE)",
-        "            dropped += 1",
-        "",
-        "        # Update the drops file: remove processed batch",
-        "        if remaining:",
-        "            all_books[0]['drops'] = remaining",
-        "        else:",
-        "            all_books.pop(0)",
-        "",
-        "        with open(drops_file, 'w') as f:",
-        "            json.dump(all_books, f, indent=2)",
-        "",
-        "        Misc.SendMessage('Dropped {}. Route in Stealth, then CTRL+K for next batch.'.format(dropped))",
-        "        if not remaining and all_books:",
-        "            Misc.SendMessage('Next book: {}'.format(all_books[0]['book_hex']))",
-        "        elif not all_books:",
-        "            Misc.SendMessage('All books done! Scan All in Stealth to rebuild.')",
-    ]
-
-    try:
-        with open(template_path, "w") as f:
-            f.write("\n".join(lines))
-    except Exception as e:
-        AddToSystemJournal(f"Failed to write RE template: {e}")
-        return 0
-
-    total = sum(len(d["drops"]) for d in drops_data)
-    AddToSystemJournal(f"RE template + drops.json ready: {total} total drops across {len(drops_data)} books")
-    AddToSystemJournal(f"  -> Press CTRL+K in RE to start (50 at a time)")
-    return total
-
-
-def route_dropped_bods(config, cycle_type):
-    """Called after user presses CTRL+K and RE finishes a batch.
-    Routes loose BODs from backpack to their planned destinations,
-    then prompts for next CTRL+K.
-    """
-    # Load the full batch plan
-    batch_path = _get_active_batch_path(cycle_type)
-    plan_entries = []
-    if os.path.exists(batch_path):
-        try:
-            with open(batch_path, "r") as f:
-                plan_entries = json.load(f)
-        except Exception:
-            pass
-
-    # Find all loose BODs in backpack
     FindType(BOD_TYPE, Backpack())
-    loose_bods = list(GetFoundList())
+    bp_before = set(GetFoundList())
 
-    if not loose_bods:
-        AddToSystemJournal("No loose BODs in backpack to route.")
-        return
-
-    AddToSystemJournal(f"Routing {len(loose_bods)} BODs from backpack...")
-
-    # Build destination counts from the plan (all destinations are books)
-    dest_groups = defaultdict(lambda: {"serial": 0, "count": 0})
-    for entry in plan_entries:
-        dt = entry["dest_type"]
-        dest = entry["dest"]
-        dest_groups[(dt, dest)]["serial"] = dest
-        dest_groups[(dt, dest)]["count"] += 1
-
-    routed = 0
-    for (dest_type, _), info in sorted(dest_groups.items()):
-        dest_serial = info["serial"]
-        if not dest_serial or not loose_bods:
-            continue
+    last_serial = 0
+    dropped = 0
+    for pos in positions:
         if check_abort():
             break
 
-        # Route up to the planned count (or whatever's left in backpack)
-        to_route = min(info["count"], len(loose_bods))
-        for _ in range(to_route):
-            if not loose_bods or check_abort():
+        # Wait for gump serial to change
+        serial = 0
+        timeout = time.time() + 2
+        while time.time() < timeout:
+            for i in range(GetGumpsCount()):
+                if GetGumpID(i) == BOOK_GUMP_ID:
+                    s = GetGumpInfo(i)["Serial"]
+                    if s != last_serial:
+                        serial = s
+                        break
+            if serial:
                 break
-            bod = loose_bods.pop(0)
-            world_save_guard()
-            MoveItem(bod, 0, dest_serial, 0, 0, 0)
-            Wait(800)
-            routed += 1
+            Wait(50)
 
-    # Remove routed entries from the plan (consume from front)
-    if routed > 0 and plan_entries:
-        plan_entries = plan_entries[routed:]
-        try:
-            with open(batch_path, "w") as f:
-                json.dump(plan_entries, f, indent=2)
-        except Exception:
-            pass
+        if not serial:
+            AddToSystemJournal(f"  Gump lost after {dropped} drops.")
+            break
 
-    AddToSystemJournal(f"Routed {routed} BODs.")
+        btn = 5 + (pos * 2)
+        result = pb.send_gump_response(serial, BOOK_GUMP_ID, btn)
+        if result > 0:
+            dropped += 1
+            last_serial = serial
+        else:
+            AddToSystemJournal(f"  Inject failed at pos {pos}")
+            break
 
-    # Check if more drops remain in the RE drops file
-    drops_path = _get_re_drops_path()
-    remaining_drops = 0
-    if os.path.exists(drops_path):
-        try:
-            with open(drops_path, "r") as f:
-                data = json.load(f)
-            remaining_drops = sum(len(d["drops"]) for d in data)
-        except Exception:
-            pass
+    Wait(500)
+    close_all_gumps()
 
-    if remaining_drops > 0:
-        AddToSystemJournal(f"  {remaining_drops} drops remaining -> Press CTRL+K for next batch")
+    FindType(BOD_TYPE, Backpack())
+    bp_after = set(GetFoundList())
+    new_bods = list(bp_after - bp_before)
+
+    AddToSystemJournal(f"  Extracted {len(new_bods)} BODs from {hex(book_serial)}")
+    return new_bods
+
+
+def _route_bods_to_book(bod_serials, dest_book):
+    """Moves extracted BODs from backpack into a destination book."""
+    routed = 0
+    for bod in bod_serials:
+        if check_abort():
+            break
+        world_save_guard()
+        MoveItem(bod, 0, dest_book, 0, 0, 0)
+        Wait(800)
+        routed += 1
+    return routed
+
+
+def execute_trim(config, cycle_type, mode="all"):
+    """Full DLL-based trim: loops analyze → extract one book → rescan → repeat until stable.
+    Converges in 1 pass because each iteration uses fresh JSONs.
+    """
+    if not _ensure_bridge():
+        return
+
+    book_serials = _get_book_serials(config, cycle_type)
+    if not book_serials:
+        AddToSystemJournal("No books configured.")
+        return
+
+    tier1 = config.get("conserva_manager", {}).get("keep_tier1", 8)
+    tier2 = config.get("conserva_manager", {}).get("keep_tier2", 20)
+    overflow_dest = _get_overflow_dest(config, cycle_type)
+
+    # Tier membership from CONFIG slot positions (not filtered array indices)
+    config_key = "conserva_books_tailor" if cycle_type == "Tailor" else "conserva_books_smith"
+    config_list = config.get(config_key, [0]*5)
+    tier1_book = config_list[0] if len(config_list) > 0 and config_list[0] != 0 else None
+    tier2_books = [s for i, s in enumerate(config_list) if 1 <= i <= 2 and s != 0]
+    overflow_config_books = set(s for i, s in enumerate(config_list) if i >= 3 and s != 0)
+    tier_books_set = set()
+    if tier1_book: tier_books_set.add(tier1_book)
+    for tb in tier2_books: tier_books_set.add(tb)
+
+    total_moved = 0
+    iteration = 0
+    MAX_ITERATIONS = 20  # safety limit
+
+    while iteration < MAX_ITERATIONS:
+        iteration += 1
+        if check_abort():
+            break
+
+        # Fresh analysis every iteration (positions change after each extraction)
+        inventories = load_all_inventories(book_serials)
+        plan = analyze_and_plan(inventories, book_serials, config, tier1, tier2, cycle_type)
+
+        if iteration == 1:
+            for line in plan["summary"]:
+                AddToSystemJournal(line)
+
+        # Check book capacities (BOD books max out at 500)
+        book_counts = {s: len(inv) for s, inv in inventories.items()}
+
+        def _dest_has_room(dest, needed=1):
+            return book_counts.get(dest, 0) + needed <= 500
+
+        # Build actions for this iteration, skipping moves to full books
+        actions_by_source = defaultdict(list)
+        skipped_full = 0
+
+        if mode == "pull_prizes":
+            # Only move wanted prizes FROM overflow config slots (3+) INTO tier slots (0-2)
+            # Never move anything OUT of tier slots
+            for bod, from_book, to_book in plan.get("moves", []):
+                if (from_book != to_book
+                        and to_book in tier_books_set
+                        and from_book not in tier_books_set):
+                    if _dest_has_room(to_book):
+                        actions_by_source[from_book].append((bod["pos"], to_book))
+                        book_counts[to_book] = book_counts.get(to_book, 0) + 1
+                    else:
+                        skipped_full += 1
+
+        elif mode != "overflow":
+            # "all" mode: full bidirectional rebalance
+            for bod, from_book, to_book in plan.get("moves", []):
+                if from_book != to_book:
+                    if _dest_has_room(to_book):
+                        actions_by_source[from_book].append((bod["pos"], to_book))
+                        book_counts[to_book] = book_counts.get(to_book, 0) + 1
+                    else:
+                        skipped_full += 1
+
+        if mode == "overflow" or mode == "all":
+            for bod, from_book in plan.get("to_overflow", []):
+                if overflow_dest and from_book != overflow_dest:
+                    if _dest_has_room(overflow_dest):
+                        actions_by_source[from_book].append((bod["pos"], overflow_dest))
+                        book_counts[overflow_dest] = book_counts.get(overflow_dest, 0) + 1
+                    else:
+                        skipped_full += 1
+
+        if skipped_full:
+            AddToSystemJournal(f"  Skipped {skipped_full} moves (destination book full at 500)")
+
+        if not actions_by_source:
+            AddToSystemJournal(f"  Iteration {iteration}: nothing to move. Stable!")
+            break
+
+        pending = sum(len(a) for a in actions_by_source.values())
+        AddToSystemJournal(f"\n--- Iteration {iteration}: {pending} BODs to move ---")
+
+        # Process ONE source book per iteration (then rescan + re-analyze)
+        source_book = next(iter(actions_by_source))
+        actions = actions_by_source[source_book]
+        actions.sort(key=lambda a: a[0], reverse=True)
+
+        # Extract in batches from this book
+        moved_this_round = 0
+        affected_books = {source_book}
+
+        for batch_start in range(0, len(actions), BATCH_SIZE):
+            if check_abort():
+                break
+
+            batch = actions[batch_start:batch_start + BATCH_SIZE]
+            positions = [a[0] for a in batch]
+
+            AddToSystemJournal(f"  Extracting {len(batch)} from {hex(source_book)} (pos {positions[0]}..{positions[-1]})")
+
+            extracted = _dll_extract_batch(source_book, positions)
+            if not extracted:
+                AddToSystemJournal("  Extraction failed. Stopping this book.")
+                break
+
+            # Route extracted BODs to destinations
+            dest_counts = defaultdict(int)
+            for _, dest in batch[:len(extracted)]:
+                dest_counts[dest] += 1
+                affected_books.add(dest)
+
+            remaining_bods = list(extracted)
+            for dest, count in dest_counts.items():
+                if not remaining_bods or check_abort():
+                    break
+                to_route = remaining_bods[:count]
+                remaining_bods = remaining_bods[count:]
+                routed = _route_bods_to_book(to_route, dest)
+                AddToSystemJournal(f"  Routed {routed} to {hex(dest)}")
+                moved_this_round += routed
+
+        total_moved += moved_this_round
+
+        # Rescan affected books so next iteration has fresh positions
+        if moved_this_round > 0 and not check_abort():
+            for serial in affected_books:
+                if check_abort():
+                    break
+                map_and_save_book_inventory(serial)
+
+    AddToSystemJournal(f"\n=== TRIM COMPLETE: {total_moved} BODs moved in {iteration} iteration(s) ===")
+
+
+# ---------------------------------------------------------------------------
+# Quick Scanner — scan any book and report prizes + filled BODs
+# ---------------------------------------------------------------------------
+
+def quick_scan_report(config, cycle_type, book_serial=0):
+    """Scans a targeted book and reports:
+      - BODs with wanted prizes (should be in Conserva, not Scartare/overflow)
+      - Completable sets
+
+    Args:
+        book_serial: specific book to scan (0 = scan all in backpack)
+    """
+    filter_key = "tailor" if cycle_type == "Tailor" else "smith"
+    enabled_prizes = config.get("prize_filter", {}).get(filter_key, [])
+
+    if book_serial:
+        bp_books = [book_serial]
     else:
-        AddToSystemJournal("  All drops complete! Run Scan All to rebuild inventories.")
+        FindType(BOD_BOOK_TYPE, Backpack())
+        bp_books = list(GetFoundList())
+
+    configured = set(_get_book_serials(config, cycle_type))
+
+    AddToSystemJournal(f"=== QUICK SCAN: {len(bp_books)} book(s) ===")
+
+    total_prizes = 0
+
+    for book_serial in bp_books:
+        if check_abort():
+            break
+
+        is_configured = book_serial in configured
+        tag = "configured" if is_configured else "NOT configured (overflow/scartare?)"
+
+        AddToSystemJournal(f"\nBook {hex(book_serial)} [{tag}]:")
+
+        # Scan the book
+        bods = map_and_save_book_inventory(book_serial)
+        if not bods:
+            AddToSystemJournal(f"  Empty or scan failed.")
+            continue
+
+        smalls = [b for b in bods if b['type'] == 'Small']
+        larges = [b for b in bods if b['type'] == 'Large']
+        AddToSystemJournal(f"  {len(bods)} BODs ({len(smalls)}S + {len(larges)}L)")
+
+        # Check for wanted prizes
+        prize_bods = []
+        for bod in bods:
+            cat = bod.get('category', '')
+            if not cat or cat not in LARGE_COMPONENTS:
+                # Try categorize from item name
+                cat = categorize_items(bod.get('item', ''))
+            prize_id = get_prize_number(cat, bod.get('material', ''),
+                                        bod.get('amount', 0),
+                                        bod.get('quality', 'Normal'))
+            if prize_id and prize_id in enabled_prizes:
+                prize_label = prize_names.get(prize_id, f"#{prize_id}")
+                prize_bods.append((bod, prize_label))
+
+        if prize_bods:
+            AddToSystemJournal(f"  WANTED PRIZES: {len(prize_bods)}")
+            # Group by prize
+            by_prize = defaultdict(int)
+            for bod, label in prize_bods:
+                by_prize[label] += 1
+            for label, count in sorted(by_prize.items()):
+                AddToSystemJournal(f"    {label}: {count}")
+            total_prizes += len(prize_bods)
+
+        # Check for filled BODs (Small BODs where tooltip shows X/X completed)
+        # In the JSON, filled BODs don't have qty info from Scanner (it's visual only).
+        # But we can check: if a Small BOD was already filled and ended up here,
+        # it should have been routed to Consegna. Flag any Large BODs too.
+        # Since Scanner doesn't track fill state, we use a different approach:
+        # parse_bod on each to check qty_needed == 0
+        # BUT that would be slow (tooltip for each). Instead, check for completable sets.
+        sets = find_completable_sets(bods)
+        if sets:
+            AddToSystemJournal(f"  COMPLETABLE SETS: {len(sets)}")
+            for s in sets:
+                large = s['large']
+                prize_id = get_prize_number(large.get('category', ''),
+                                            large.get('material', ''),
+                                            large.get('amount', 0),
+                                            large.get('quality', 'Normal'))
+                prize_label = prize_names.get(prize_id, f"#{prize_id}") if prize_id else "?"
+                AddToSystemJournal(
+                    f"    {large['category']} {large['material']} "
+                    f"{large['quality']} x{large['amount']} -> {prize_label}"
+                )
+
+    AddToSystemJournal(f"\n=== QUICK SCAN COMPLETE: {total_prizes} wanted-prize BODs found ===")
+    if total_prizes > 0:
+        AddToSystemJournal("  Run Trim All to pull these into the correct tier books.")
+
+
+def categorize_items(item_name):
+    """Local import wrapper for bod_data.categorize_items."""
+    from bod_data import categorize_items as _cat
+    return _cat(item_name)
+
+
+# ---------------------------------------------------------------------------
+# Fill Backpack BODs — craft + combine loose BODs one at a time
+# ---------------------------------------------------------------------------
+
+def fill_next_backpack_bod(config, cycle_type):
+    """Finds the first unfilled Small BOD in backpack, crafts items to fill it,
+    then checks if a matching Large BOD is present to combine.
+
+    Processes ONE BOD per click. Returns True if a BOD was filled.
+    """
+    import BodCycler_Crafting
+    from BodCycler_Assembler import combine_and_store
+    from bod_crafting_data import MATERIAL_MAP
+
+    crate = config.get("containers", {}).get("MaterialCrate", 0)
+
+    # Find all loose BODs in backpack
+    FindType(BOD_TYPE, Backpack())
+    all_bods = list(GetFoundList())
+    if not all_bods:
+        AddToSystemJournal("No BODs in backpack.")
+        return False
+
+    # Find first unfilled Small BOD
+    target_bod = None
+    target_info = None
+    large_bod = None
+    large_info = None
+
+    for bod_serial in all_bods:
+        info = BodCycler_Crafting.parse_bod(bod_serial, cycle_type)
+        if not info:
+            continue
+        if info.get('is_large'):
+            large_bod = bod_serial
+            large_info = info
+            continue
+        if info.get('qty_needed', 0) > 0:
+            target_bod = bod_serial
+            target_info = info
+            break  # take the first unfilled Small
+
+    if not target_bod:
+        # No unfilled Smalls — check if we have a Large + filled Smalls to combine
+        if large_bod:
+            AddToSystemJournal("All Smalls filled. Checking if Large can be combined...")
+            small_serials = []
+            for bod_serial in all_bods:
+                if bod_serial == large_bod:
+                    continue
+                info = BodCycler_Crafting.parse_bod(bod_serial, cycle_type)
+                if info and not info.get('is_large') and info.get('qty_needed', 0) <= 0:
+                    small_serials.append(bod_serial)
+
+            if small_serials:
+                success = combine_and_store(large_bod, small_serials, config)
+                if success:
+                    AddToSystemJournal("Combined and routed to Consegna!")
+                    from BodCycler_Utils import read_stats, write_stats
+                    stats = read_stats()
+                    stats["prized_large"] = stats.get("prized_large", 0) + 1
+                    write_stats(stats)
+                return success
+        AddToSystemJournal("No unfilled BODs in backpack.")
+        return False
+
+    # We have an unfilled Small BOD — craft it
+    AddToSystemJournal(
+        f"Filling: {target_info['item_name']} ({target_info['material']}) "
+        f"{target_info['qty_needed']} remaining"
+    )
+
+    cat_id, item_id_btn, item_gfx, tool_type, item_cost = BodCycler_Crafting.get_craft_info(
+        target_info['item_name'], cycle_type
+    )
+    if cat_id is None:
+        AddToSystemJournal(f"  Not in craft dictionary: {target_info['item_name']}")
+        return False
+
+    # Pull materials
+    to_make = target_info['qty_needed']
+    if not BodCycler_Crafting.check_and_pull_materials(
+            target_info['material'], to_make, item_cost, crate, cycle_type):
+        AddToSystemJournal(f"  Insufficient materials for {target_info['material']}.")
+        return False
+
+    # Craft
+    mat_btn = MATERIAL_MAP[target_info['material'].lower()]['btn']
+    success = BodCycler_Crafting.craft_items_until_done(
+        target_bod, tool_type, cat_id, item_id_btn,
+        target_info['item_name'], item_gfx,
+        target_info['qty_needed'], target_info['is_except'], mat_btn
+    )
+    close_all_gumps()
+
+    if not success:
+        AddToSystemJournal(f"  Crafting failed for {target_info['item_name']}.")
+        return False
+
+    # Fill the BOD
+    is_full = BodCycler_Crafting.fill_bod_completely(
+        target_bod, item_gfx, target_info['qty_needed'],
+        target_info['item_name'], target_info['is_except']
+    )
+    close_all_gumps()
+
+    if is_full:
+        AddToSystemJournal(f"  Filled! {target_info['item_name']} ({target_info['material']})")
+
+        # Check remaining unfilled count
+        FindType(BOD_TYPE, Backpack())
+        remaining_unfilled = 0
+        for bs in GetFoundList():
+            bi = BodCycler_Crafting.parse_bod(bs, cycle_type)
+            if bi and not bi.get('is_large') and bi.get('qty_needed', 0) > 0:
+                remaining_unfilled += 1
+
+        AddToSystemJournal(f"  {remaining_unfilled} unfilled BOD(s) remaining in backpack.")
+
+        # If all smalls filled and a Large is present, offer to combine
+        if remaining_unfilled == 0 and large_bod:
+            AddToSystemJournal("  All Smalls filled + Large present — combining!")
+            small_serials = []
+            FindType(BOD_TYPE, Backpack())
+            for bs in GetFoundList():
+                if bs == large_bod:
+                    continue
+                bi = BodCycler_Crafting.parse_bod(bs, cycle_type)
+                if bi and not bi.get('is_large'):
+                    small_serials.append(bs)
+            if small_serials:
+                combine_and_store(large_bod, small_serials, config)
+                AddToSystemJournal("  Combined and routed to Consegna!")
+        return True
+    else:
+        AddToSystemJournal(f"  Fill failed for {target_info['item_name']}.")
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -625,12 +819,17 @@ def check_completable_sets(config, cycle_type, overflow_only=False):
 
 
 def extract_and_combine_next_set(config, cycle_type, overflow_only=False):
-    """Finds the first completable set, writes RE drops for JUST that set (1 Large + Smalls),
-    then after user CTRL+K's, combines them and routes to Consegna.
+    """Finds the first completable set, extracts via DLL, combines, routes to Consegna.
+    All in one step — no CTRL+K needed.
 
     If overflow_only=True, only checks overflow books (index 3+).
-    Flow: extract_and_combine_next_set() -> user CTRL+K -> assemble_dropped_set()
     """
+    from BodCycler_Assembler import combine_and_store
+    import BodCycler_Crafting
+
+    if not _ensure_bridge():
+        return False
+
     book_serials = _get_book_serials(config, cycle_type)
     if overflow_only:
         key = "conserva_books_tailor" if cycle_type == "Tailor" else "conserva_books_smith"
@@ -638,7 +837,7 @@ def extract_and_combine_next_set(config, cycle_type, overflow_only=False):
         book_serials = [s for i, s in enumerate(full_list) if i >= 3 and s != 0]
     inventories = load_all_inventories(book_serials)
 
-    # Find first completable set across all books
+    # Find first completable set
     target_set = None
     target_book = None
     for serial in book_serials:
@@ -652,96 +851,37 @@ def extract_and_combine_next_set(config, cycle_type, overflow_only=False):
             break
 
     if not target_set:
-        AddToSystemJournal("No completable sets found. Nothing to extract.")
+        AddToSystemJournal("No completable sets found.")
         return False
 
     large = target_set['large']
     smalls = target_set['smalls']
-    prize_id = large.get('prize_id')
+    prize_id = get_prize_number(large['category'], large['material'],
+                                large['amount'], large['quality'])
     prize_label = prize_names.get(prize_id, f"#{prize_id}") if prize_id else "?"
 
     AddToSystemJournal(
-        f"Extracting set: {large['category']} {large['material']} "
+        f"Set: {large['category']} {large['material']} "
         f"{large['quality']} x{large['amount']} -> {prize_label}"
     )
-    AddToSystemJournal(f"  From book {hex(target_book)}: 1 Large + {len(smalls)} Smalls")
+    AddToSystemJournal(f"  From {hex(target_book)}: 1 Large + {len(smalls)} Smalls")
 
-    # Collect all positions, sort descending
-    all_bods = [large] + smalls
-    positions = sorted([b['pos'] for b in all_bods], reverse=True)
-    drop_btns = [5 + (p * 2) for p in positions]
+    # Collect positions, sort descending
+    all_set_bods = [large] + smalls
+    positions = sorted([b['pos'] for b in all_set_bods], reverse=True)
 
-    # Write RE drops — just this one set
-    drops_data = [{
-        "book": target_book,
-        "book_hex": hex(target_book),
-        "drops": drop_btns,
-    }]
-
-    drops_path = _get_re_drops_path()
-    try:
-        with open(drops_path, "w") as f:
-            json.dump(drops_data, f, indent=2)
-    except Exception as e:
-        AddToSystemJournal(f"Failed to write drops JSON: {e}")
+    # Extract via DLL
+    extracted = _dll_extract_batch(target_book, positions)
+    if not extracted:
+        AddToSystemJournal("  Extraction failed.")
         return False
 
-    # Save set info so assemble_dropped_set knows what to combine + reindex
-    set_info = {
-        "book": target_book,
-        "large": {"category": large['category'], "material": large['material'],
-                  "quality": large['quality'], "amount": large['amount']},
-        "small_count": len(smalls),
-        "total_bods": len(all_bods),
-        "extracted_positions": sorted(positions, reverse=True),  # descending, for reindex
-    }
-    set_info_path = f"{StealthPath()}Scripts\\{CharName()}_conserva_pending_set.json"
-    try:
-        with open(set_info_path, "w") as f:
-            json.dump(set_info, f, indent=2)
-    except Exception:
-        pass
+    AddToSystemJournal(f"  Extracted {len(extracted)} BODs via DLL.")
 
-    # Ensure RE template exists
-    template_path = _get_re_template_path()
-    if not os.path.exists(template_path):
-        write_re_template_and_queue(config, cycle_type)
-
-    AddToSystemJournal(f"  RE ready: {len(drop_btns)} drops. Press CTRL+K, then click 'Combine Set'")
-    return True
-
-
-def assemble_dropped_set(config, cycle_type):
-    """Called after CTRL+K dropped exactly 1 set into backpack.
-    Identifies the Large + Smalls, combines them, routes to Consegna,
-    then checks for the next set.
-    """
-    from BodCycler_Assembler import combine_and_store
-
-    # Load pending set info
-    set_info_path = f"{StealthPath()}Scripts\\{CharName()}_conserva_pending_set.json"
-    if not os.path.exists(set_info_path):
-        AddToSystemJournal("No pending set to assemble. Click 'Next Set' first.")
-        return False
-
-    try:
-        with open(set_info_path, "r") as f:
-            set_info = json.load(f)
-    except Exception:
-        AddToSystemJournal("Failed to read pending set info.")
-        return False
-
-    # Find all loose BODs in backpack
-    FindType(BOD_TYPE, Backpack())
-    loose_bods = list(GetFoundList())
-    AddToSystemJournal(f"Found {len(loose_bods)} BODs in backpack. Identifying Large...")
-
-    # Identify the Large BOD (parse each to find it)
-    import BodCycler_Crafting
+    # Identify Large vs Smalls from extracted serials
     large_serial = None
     small_serials = []
-
-    for bod_serial in loose_bods:
+    for bod_serial in extracted:
         info = BodCycler_Crafting.parse_bod(bod_serial, cycle_type)
         if not info:
             continue
@@ -751,7 +891,7 @@ def assemble_dropped_set(config, cycle_type):
             small_serials.append(bod_serial)
 
     if not large_serial:
-        AddToSystemJournal("ERROR: No Large BOD found in backpack. Did CTRL+K run?")
+        AddToSystemJournal("  ERROR: No Large BOD in extracted set.")
         return False
 
     AddToSystemJournal(f"  Large: {hex(large_serial)} | Smalls: {len(small_serials)}")
@@ -760,52 +900,114 @@ def assemble_dropped_set(config, cycle_type):
     success = combine_and_store(large_serial, small_serials, config)
 
     if success:
-        AddToSystemJournal("Set combined and routed to Consegna!")
+        AddToSystemJournal("  Combined and routed to Consegna!")
         from BodCycler_Utils import read_stats, write_stats
         stats = read_stats()
         stats["prized_large"] = stats.get("prized_large", 0) + 1
         write_stats(stats)
     else:
-        AddToSystemJournal("FAILED to combine set. Check backpack manually.")
+        AddToSystemJournal("  FAILED to combine. Check backpack.")
 
-    # Update the source book's inventory JSON — remove extracted positions + reindex
-    extracted_positions = set(set_info.get("extracted_positions", []))
-    book_serial = set_info.get("book", 0)
-    if extracted_positions and book_serial:
-        inv_file = get_inventory_file(book_serial)
-        if os.path.exists(inv_file):
-            try:
-                with _INV_LOCK:
-                    with open(inv_file, "r") as f:
-                        inventory = json.load(f)
-                    # Remove extracted entries
-                    inventory = [b for b in inventory if b.get("pos") not in extracted_positions]
-                    # Reindex 0..N-1
-                    for new_pos, entry in enumerate(inventory):
-                        entry["pos"] = new_pos
-                        entry["drop_btn"] = 5 + (new_pos * 2)
-                        entry["page"] = new_pos // 5
-                    # Save atomically
-                    tmp = inv_file + ".tmp"
-                    with open(tmp, "w") as f:
-                        json.dump(inventory, f, indent=4)
-                    os.replace(tmp, inv_file)
-                AddToSystemJournal(f"  JSON reindexed: {len(inventory)} BODs remaining in {hex(book_serial)}")
-            except Exception as e:
-                AddToSystemJournal(f"  WARNING: Failed to reindex JSON — {e}. Re-scan recommended.")
+    # Reindex source book JSON
+    extracted_positions = set(positions)
+    inv_file = get_inventory_file(target_book)
+    if os.path.exists(inv_file):
+        try:
+            with _INV_LOCK:
+                with open(inv_file, "r") as f:
+                    inventory = json.load(f)
+                inventory = [b for b in inventory if b.get("pos") not in extracted_positions]
+                for new_pos, entry in enumerate(inventory):
+                    entry["pos"] = new_pos
+                    entry["drop_btn"] = 5 + (new_pos * 2)
+                    entry["page"] = new_pos // 5
+                tmp = inv_file + ".tmp"
+                with open(tmp, "w") as f:
+                    json.dump(inventory, f, indent=4)
+                os.replace(tmp, inv_file)
+            AddToSystemJournal(f"  JSON reindexed: {len(inventory)} remaining in {hex(target_book)}")
+        except Exception as e:
+            AddToSystemJournal(f"  WARNING: Reindex failed — {e}")
 
-    # Clean up pending set file
-    try:
-        os.remove(set_info_path)
-    except Exception:
-        pass
-
-    # Check for next set
+    # Check for more sets
     remaining = check_completable_sets(config, cycle_type)
     if remaining > 0:
-        AddToSystemJournal("  -> Click 'Next Set' to extract the next one.")
+        AddToSystemJournal(f"  {remaining} more set(s) available.")
 
     return success
+
+
+# ---------------------------------------------------------------------------
+# Fast Drop via DLL Injection (bypasses page flipping)
+# ---------------------------------------------------------------------------
+
+def fast_drop_bods(book_serial, positions, pause_ms=200):
+    """Drops BODs from a book using raw 0xB1 packets via the injected DLL.
+    Book must be open (UseObject already called). Positions must be descending.
+    Returns number of successful drops.
+
+    Falls back to RE template approach if DLL is not available.
+    """
+    try:
+        import BodCycler_PacketBridge as pb
+        if not pb.is_connected():
+            if not pb.connect():
+                AddToSystemJournal("PacketBridge: Not connected. Is DLL injected?")
+                return 0
+
+        st = pb.status()
+        if not st.get("captured"):
+            AddToSystemJournal("PacketBridge: Socket not captured yet. Send any action in Stealth first.")
+            return 0
+    except ImportError:
+        AddToSystemJournal("PacketBridge: Module not found. DLL injection not available.")
+        return 0
+
+    # Book should already be open — get current gump serial
+    idx = -1
+    for i in range(GetGumpsCount()):
+        if GetGumpID(i) == BOOK_GUMP_ID:
+            idx = i
+            break
+    if idx == -1:
+        AddToSystemJournal("FastDrop: No book gump open.")
+        return 0
+
+    dropped = 0
+    last_serial = 0
+    for pos in positions:
+        if check_abort():
+            break
+
+        # Wait for gump serial to change (server sends new gump after each drop)
+        serial = 0
+        timeout = time.time() + 2
+        while time.time() < timeout:
+            for i in range(GetGumpsCount()):
+                if GetGumpID(i) == BOOK_GUMP_ID:
+                    s = GetGumpInfo(i)["Serial"]
+                    if s != last_serial:
+                        serial = s
+                        break
+            if serial:
+                break
+            Wait(50)
+
+        if not serial:
+            AddToSystemJournal(f"FastDrop: Lost gump after {dropped} drops.")
+            break
+
+        btn = 5 + (pos * 2)
+        result = pb.send_gump_response(serial, BOOK_GUMP_ID, btn)
+        if result > 0:
+            dropped += 1
+            last_serial = serial
+        else:
+            AddToSystemJournal(f"FastDrop: inject failed at pos {pos} (result={result})")
+            break
+
+    AddToSystemJournal(f"FastDrop: {dropped}/{len(positions)} BODs dropped.")
+    return dropped
 
 
 # ---------------------------------------------------------------------------
