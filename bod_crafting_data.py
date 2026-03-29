@@ -122,6 +122,7 @@ SMITH_ITEMS = {
     "scimitar":             (29, 58, 0x13B6, 8,  "iron"),
     "viking sword":         (29, 65, 0x13B9, 15, "iron"),
     # ── Bashing (cat=50) ──────────────────────────────────────────────────────
+    "hammer pick":          (50, 2,  0x13E3, 4,  "iron"),   # pos 1
     "mace":                 (50, 9,  0x0F5C, 6,  "iron"),
     "maul":                 (50, 16, 0x143B, 14, "iron"),
     "war hammer":           (50, 37, 0x1439, 17, "iron"),
