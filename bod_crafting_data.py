@@ -92,6 +92,7 @@ SMITH_ITEMS = {
     "female plate":         (1, 86, 0x1C04, 20, "iron"),  # item 13 (Metal Armor, page 2, last)
     "bascinet":             (8, 2,  0x140C, 15, "iron"),
     "close helmet":         (8, 9,  0x1408, 15, "iron"),
+    "helmet":               (8, 16, 0x140A, 15, "iron"),
     "norse helm":           (8, 23, 0x140E, 10, "iron"),
     "plate helm":           (8, 30, 0x1412, 15, "iron"),
     "buckler":              (15, 2,  0x1B73, 10, "iron"),
@@ -125,7 +126,9 @@ SMITH_ITEMS = {
     "maul":                 (50, 16, 0x143B, 14, "iron"),
     "war hammer":           (50, 37, 0x1439, 17, "iron"),
     # ── Polearms (cat=57) ─────────────────────────────────────────────────────
-    "spear":                (57, 51, 0x0F62, 6,  "iron"),
+    "halberd":              (57, 16, 0x143E, 14, "iron"),   # pos 3
+    "spear":                (57, 51, 0x0F62, 6,  "iron"),   # pos 8
+    "war fork":             (57, 58, 0x1405, 12, "iron"),   # pos 9
     # ── Routing-only (btn=0 → not crafted; large BODs routed to Scartare) ────
     "bardiche":             (0,  0,  0x0F4D, 0,  "iron"),
 }

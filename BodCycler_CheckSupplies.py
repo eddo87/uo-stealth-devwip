@@ -63,7 +63,7 @@ LEATHER_COLORS = {
 BTN_CATEGORY_TOOLS = 8
 BTN_MAKE_TINKER_TOOL = 23
 BTN_MAKE_SEWING_KIT = 44  
-BTN_MAKE_TONGS = 16       
+BTN_MAKE_TONGS = 86       # page 2 of Tools (absolute btn; scorp is btn 16 on page 1)
 
 # ✅ AFTER — one import covers everything
 from BodCycler_Utils import (

@@ -437,6 +437,41 @@ class BodCyclerGUI(threading.Thread):
                     NumGumpButton(i, btn_id)
                     return
 
+    def _recall_home(self):
+        """Recalls to WorkSpot1 rune then walks to config["home"] if not already there."""
+        home = self.config.get("home", {})
+        hx, hy = home.get("X", 0), home.get("Y", 0)
+        if not hx or not hy:
+            AddToSystemJournal("_recall_home: home position not set — skipping.")
+            return
+
+        if GetX(Self()) == hx and GetY(Self()) == hy:
+            return  # already home
+
+        AddToSystemJournal(f"Not at home ({GetX(Self())},{GetY(Self())} vs {hx},{hy}). Recalling...")
+        rb_serial = self.config.get("travel", {}).get("RuneBook", 0)
+        if rb_serial:
+            method = self.config.get("travel", {}).get("Method", "Recall")
+            rune_idx = self.config.get("travel", {}).get("Runes", {}).get("WorkSpot1", 1)
+            offset   = 5 if method == "Recall" else 7
+            btn_id   = offset + (rune_idx - 1) * 6
+            UseObject(rb_serial)
+            for _ in range(30):
+                time.sleep(0.1)
+                for i in range(GetGumpsCount()):
+                    if GetGumpID(i) == 0x554B87F3:
+                        NumGumpButton(i, btn_id)
+                        time.sleep(2.5)  # wait for recall landing
+                        break
+                else:
+                    continue
+                break
+        else:
+            AddToSystemJournal("_recall_home: no RuneBook configured.")
+
+        newMoveXY(hx, hy, False, 1, True)
+        Wait(600)
+
     # --- Live Dashboard Parsers ---
     def read_supplies_file(self):
         try:
@@ -536,6 +571,9 @@ class BodCyclerGUI(threading.Thread):
         AddToSystemJournal("=== MASTER CYCLE INITIATED ===")
         while not self._is_stopped():
             try:
+                # STEP 0: Ensure character is at home before doing anything
+                self._recall_home()
+
                 # STEP 1: Check Supplies & Maintain Tools (must run before crafting)
                 if self._is_stopped(): break
                 self.set_global_status("Running (Supplies)")
@@ -553,8 +591,11 @@ class BodCyclerGUI(threading.Thread):
                 try:
                     if BodCycler_TakeBods.should_collect_bods():
                         self.set_global_status("Running (BOD Collection)")
-                        AddToSystemJournal("BOD collection due! Pausing ed4 → walking to standby (892, 537)...")
-                        newMoveXY(892, 537, False, 1, True)
+                        _home = load_config().get("home", {})
+                        _hx, _hy = _home.get("X", 0), _home.get("Y", 0)
+                        AddToSystemJournal(f"BOD collection due! Pausing ed4 → walking to standby ({_hx},{_hy})...")
+                        if _hx and _hy:
+                            newMoveXY(_hx, _hy, False, 1, True)
                         time.sleep(2)
                         Disconnect()
                         BodCycler_TakeBods.run_take_bods_cycle()
