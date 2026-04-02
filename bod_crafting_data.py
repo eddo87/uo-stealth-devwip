@@ -104,12 +104,13 @@ SMITH_ITEMS = {
     "metal shield":         (15, 23, 0x1B7B, 14, "iron"),
     "metal kite shield":    (15, 30, 0x1B74, 20, "iron"),
     "tear kite shield":     (15, 37, 0x1B78, 20, "iron"),
-    # ── Axes (cat=22) ─────────────────────────────────────────────────────────
-    "axe":                  (22, 2,  0x0F49, 6,  "iron"),
-    "battle axe":           (22, 9,  0x0F47, 13, "iron"),
-    "executioner's axe":    (22, 23, 0x0F45, 13, "iron"),
-    "two handed axe":       (22, 37, 0x1443, 13, "iron"),
-    "war axe":              (22, 44, 0x13AF, 10, "iron"),
+    # ── Axes (cat=36) ─────────────────────────────────────────────────────────
+    "axe":                  (36, 2,  0x0F49, 6,  "iron"),
+    "battle axe":           (36, 9,  0x0F47, 13, "iron"),
+    "double axe":           (36, 16, 0x0F4B, 12, "iron"),   # pos 3
+    "executioner's axe":    (36, 23, 0x0F45, 13, "iron"),
+    "two handed axe":       (36, 37, 0x1443, 13, "iron"),
+    "war axe":              (36, 44, 0x13AF, 10, "iron"),
     # ── Bladed weapons (cat=29) ───────────────────────────────────────────────
     "bone harvester":       (29, 2,  0x26BB, 10, "iron"),
     "broadsword":           (29, 9,  0x0F5E, 10, "iron"),
@@ -125,13 +126,15 @@ SMITH_ITEMS = {
     "hammer pick":          (50, 2,  0x143D, 16,  "iron"),   # pos 1
     "mace":                 (50, 9,  0x0F5C, 6,  "iron"),
     "maul":                 (50, 16, 0x143B, 10, "iron"),
+    "war mace":             (50, 30, 0x1407, 10, "iron"),   # pos 5
     "war hammer":           (50, 37, 0x1439, 16, "iron"),
-    # ── Polearms (cat=57) ─────────────────────────────────────────────────────
-    "halberd":              (57, 16, 0x143E, 14, "iron"),   # pos 3
-    "spear":                (57, 51, 0x0F62, 6,  "iron"),   # pos 8
-    "war fork":             (57, 58, 0x1405, 12, "iron"),   # pos 9
+    # ── Polearms (cat=43) ─────────────────────────────────────────────────────
+    "halberd":              (43, 16, 0x143E, 14, "iron"),   # pos 3
+    "spear":                (43, 51, 0x0F62, 6,  "iron"),   # pos 8
+    "war fork":             (43, 58, 0x1405, 12, "iron"),   # pos 9
     # ── Routing-only (btn=0 → not crafted; large BODs routed to Scartare) ────
     "bardiche":             (0,  0,  0x0F4D, 0,  "iron"),
+    "boomerang":            (0,  0,  0x27A2, 0,  "iron"),
 }
 
 MATERIAL_MAP = {

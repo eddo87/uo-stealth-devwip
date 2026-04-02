@@ -2,6 +2,7 @@ from stealth import *
 import json
 import os
 import time
+from datetime import datetime
 import BodCycler_Crafting
 import BodCycler_AI_Debugger
 try:
@@ -21,6 +22,10 @@ from BodCycler_Utils import (
 
 NPC_TYPES = [0x0190, 0x0191]       # Male/Female human
 CTX_BUY = 1                        # Context Menu entry for 'Buy'
+
+# Persists across execute_trade_loop() calls — True only on the very first run
+# so the bot requests a BOD on arrival. Subsequent cycles already have one pre-fetched.
+_first_bod_taken = False
 CTX_BOD = 3                        # Context Menu entry for 'Bulk Order Info'
 BTN_ACCEPT_BOD = 1                 # 'Accept' button on BOD offer gump
 BTN_DROP_BOD_1 = 5                 # First 'Drop' button inside a BOD book
@@ -346,14 +351,18 @@ def buy_and_cut_cloth(npc, amount=80):
             Wait(700)
 
 def travel_to(runebook_serial, travel_method, rune_index):
+    """Recalls to a single rune. Returns True on success, 'blocked' if location blocked,
+    'disturbed' if concentration interrupted, False if gump never appeared."""
     if runebook_serial == 0: return False
     start_x = GetX(Self())
     start_y = GetY(Self())
-    
+
     offset = 5 if travel_method == "Recall" else 7
     btn_id = offset + (rune_index - 1) * 6
+
+    cast_start = datetime.now()
     UseObject(runebook_serial)
-    
+
     t = time.time()
     gump_pressed = False
     while time.time() - t < 3:
@@ -364,20 +373,55 @@ def travel_to(runebook_serial, travel_method, rune_index):
                 gump_pressed = True
                 break
         if gump_pressed: break
-        Wait(100) 
-        
+        Wait(100)
+
     if not gump_pressed: return False
-        
+
     t = time.time()
     while time.time() - t < 6:
         world_save_guard()
+        now = datetime.now()
+        if InJournalBetweenTimes("That location is blocked", cast_start, now) != -1:
+            Wait(900)
+            return 'blocked'
+        if InJournalBetweenTimes("Your concentration is disturbed", cast_start, now) != -1:
+            return 'disturbed'
         if abs(GetX(Self()) - start_x) > 5 or abs(GetY(Self()) - start_y) > 5:
-            Wait(1000) 
+            Wait(1000)
             return True
         Wait(100)
+    # Gump was pressed but no 5-tile movement detected — recall likely landed
+    # very close to start position (same area). Treat as success.
+    return True if gump_pressed else False
+
+
+def travel_to_with_fallback(runebook_serial, travel_method, rune_indices):
+    """Tries rune_indices in order. Blocked → next rune. Disturbed → retry same rune."""
+    idx_iter = iter(rune_indices)
+    current  = next(idx_iter, None)
+    while current is not None:
+        while True:  # retry loop for disturbed
+            result = travel_to(runebook_serial, travel_method, current)
+            if result is True:
+                return True
+            elif result == 'disturbed':
+                AddToSystemJournal(f"travel_to_with_fallback: concentration disturbed on rune {current} — retrying.")
+                Wait(1500)
+                continue  # retry same rune
+            elif result == 'blocked':
+                AddToSystemJournal(f"travel_to_with_fallback: rune {current} blocked — trying next.")
+                break  # advance to next rune
+            else:
+                AddToSystemJournal(f"travel_to_with_fallback: rune {current} failed — trying next.")
+                break
+        current = next(idx_iter, None)
+    AddToSystemJournal("travel_to_with_fallback: all runes exhausted.")
     return False
 
-def process_prizes_at_home(trash_serial, material_crate_serial, dye_tub_serial, reward_crate_serial, rb_serial=0, cycle_type="Tailor"):
+CONSUMABLE_CRATE_CAP = 125
+
+def process_prizes_at_home(trash_serial, material_crate_serial, dye_tub_serial, reward_crate_serial, rb_serial=0, cycle_type="Tailor",
+                           prospector_crate=0, powder_crate=0, config=None):
     """
     Handles post-cycle cleanup.
     Args:
@@ -387,7 +431,10 @@ def process_prizes_at_home(trash_serial, material_crate_serial, dye_tub_serial, 
         dye_tub_serial: ID of the Cloth Dye Tub.
         rb_serial: ID of the Runebook to avoid moving it.
         cycle_type: "Tailor" or "Smith" — controls which prizes and materials to process.
+        config: loaded config dict; loaded fresh if not provided.
     """
+    if config is None:
+        config = load_config() or {}
 
     # 1. Clean up trash items (both modes)
     if trash_serial != 0:
@@ -455,43 +502,108 @@ def process_prizes_at_home(trash_serial, material_crate_serial, dye_tub_serial, 
                         _move_prize(item, "Clothing Bless Deed")
 
         elif cycle_type == "Smith":
-            # Runic Hammers: type 0x13E3, any non-zero color = a runic tier
-            # Color matches ore hues: DC=0x0973, Shadow=0x0966, Copper=0x096D,
-            # Bronze=0x0972, Gold=0x08A5, Agapite=0x0979, Verite=0x089F, Valorite=0x08AB
-            from bod_data import prize_names as _prize_names
+            # Runic Hammers: type 0x13E3, any non-zero color = a runic tier.
+            # prize_id from bod_data: DC=6, Shadow=8, Copper=10, Bronze=12,
+            # Gold=17, Agapite=19, Verite=21, Valorite=22
             runic_hues = {
-                0x0973: "Dull Copper Runic Hammer",
-                0x0966: "Shadow Iron Runic Hammer",
-                0x096D: "Copper Runic Hammer",
-                0x0972: "Bronze Runic Hammer",
-                0x08A5: "Gold Runic Hammer",
-                0x0979: "Agapite Runic Hammer",
-                0x089F: "Verite Runic Hammer",
-                0x08AB: "Valorite Runic Hammer",
+                0x0973: (6,  "Dull Copper Runic Hammer"),
+                0x0966: (8,  "Shadow Iron Runic Hammer"),
+                0x096D: (10, "Copper Runic Hammer"),
+                0x0972: (12, "Bronze Runic Hammer"),
+                0x08A5: (17, "Gold Runic Hammer"),
+                0x0979: (19, "Agapite Runic Hammer"),
+                0x089F: (21, "Verite Runic Hammer"),
+                0x08AB: (22, "Valorite Runic Hammer"),
             }
             FindType(0x13E3, Backpack())  # Smith's Hammer base type
             for item in GetFoundList():
                 if check_abort(): return
                 hue = GetColor(item)
-                if hue in runic_hues:
-                    world_save_guard()
-                    _move_prize(item, runic_hues[hue])
+                if hue not in runic_hues:
+                    continue
+                prize_id, label = runic_hues[hue]
+                world_save_guard()
+                if is_prize_enabled(prize_id, config):
+                    _move_prize(item, label)
+                else:
+                    AddToSystemJournal(f"Trashing {label} (prize disabled).")
+                    MoveItem(item, 1, trash_serial, 0, 0, 0)
+                    Wait(600)
 
             # Power Scrolls: type 0x14F0 — check tooltip for "power scroll"
+            # prize_id: 115 SOP=14 (prize_id 14), 120 SOP=16 (prize_id 16)
+            ps_prize_ids = {"105": 9, "110": 11, "115": 14, "120": 16}
             FindType(0x14F0, Backpack())
             for item in GetFoundList():
                 if check_abort(): return
                 tooltip = GetTooltip(item).lower()
-                if "power scroll" in tooltip:
-                    world_save_guard()
-                    _move_prize(item, f"Power Scroll ({GetTooltip(item).split('|')[0].strip()})")
+                if "power scroll" not in tooltip:
+                    continue
+                label = f"Power Scroll ({GetTooltip(item).split('|')[0].strip()})"
+                # Determine prize_id from skill value in tooltip
+                prize_id = None
+                for val, pid in ps_prize_ids.items():
+                    if val in tooltip:
+                        prize_id = pid
+                        break
+                world_save_guard()
+                if prize_id and is_prize_enabled(prize_id, config):
+                    _move_prize(item, label)
+                elif prize_id:
+                    AddToSystemJournal(f"Trashing {label} (prize disabled).")
+                    MoveItem(item, 1, trash_serial, 0, 0, 0)
+                    Wait(600)
+                else:
+                    _move_prize(item, label)  # unknown PS value → keep
 
-            # Ancient Smith's Hammer: type 0x0FB4
-            FindType(0x0FB4, Backpack())
+            # Ancient Smith's Hammers
+            # prize_id: +10=13, +15=15, +30=18, +60=20
+            ash_prize_ids = {"+10": 13, "+15": 15, "+30": 18, "+60": 20}
+            FindType(0x13E4, Backpack())
             for item in GetFoundList():
                 if check_abort(): return
+                tooltip = GetTooltip(item).lower()
+                label = "Ancient Smith's Hammer"
+                prize_id = None
+                for val, pid in ash_prize_ids.items():
+                    if val in tooltip:
+                        prize_id = pid
+                        break
                 world_save_guard()
-                _move_prize(item, "Ancient Smith's Hammer")
+                if prize_id and is_prize_enabled(prize_id, config):
+                    _move_prize(item, label)
+                elif prize_id:
+                    AddToSystemJournal(f"Trashing {label} {val} (prize disabled).")
+                    MoveItem(item, 1, trash_serial, 0, 0, 0)
+                    Wait(600)
+                else:
+                    _move_prize(item, label)  # unknown bonus → keep
+
+    # 4. Consumables with capped crates (both cycle types)
+    def _store_consumable(item_type, crate_serial, label):
+        """Move item to crate if under cap, otherwise trash it."""
+        FindType(item_type, Backpack())
+        for item in GetFoundList():
+            if check_abort(): return
+            world_save_guard()
+            if crate_serial:
+                FindType(item_type, crate_serial)
+                crate_count = FindFullQuantity()
+                if crate_count < CONSUMABLE_CRATE_CAP:
+                    AddToSystemJournal(f"Storing {label} ({crate_count+1}/{CONSUMABLE_CRATE_CAP}).")
+                    MoveItem(item, 1, crate_serial, 0, 0, 0)
+                    Wait(600)
+                else:
+                    AddToSystemJournal(f"{label} crate full ({CONSUMABLE_CRATE_CAP}) — trashing.")
+                    if trash_serial:
+                        MoveItem(item, 1, trash_serial, 0, 0, 0)
+                        Wait(600)
+            elif trash_serial:
+                MoveItem(item, 1, trash_serial, 0, 0, 0)
+                Wait(600)
+
+    _store_consumable(0x0FB4, prospector_crate, "Prospector's Tool")
+    _store_consumable(0x1006, powder_crate,     "Powder of Fortifying")
 
 def execute_trade_loop():
     config = load_config()
@@ -512,10 +624,12 @@ def execute_trade_loop():
     home_x = config.get("home", {}).get("X", 0)
     home_y = config.get("home", {}).get("Y", 0)
 
-    trash_serial = config.get("containers", {}).get("TrashBarrel", 0)
-    crate_serial = config.get("containers", {}).get("MaterialCrate", 0)
-    dye_tub_serial = config.get("containers", {}).get("ClothDyeTub", 0)
+    trash_serial        = config.get("containers", {}).get("TrashBarrel", 0)
+    crate_serial        = config.get("containers", {}).get("MaterialCrate", 0)
+    dye_tub_serial      = config.get("containers", {}).get("ClothDyeTub", 0)
     reward_crate_serial = config.get("containers", {}).get("RewardCrate", 0)
+    prospector_crate    = config.get("containers", {}).get("ProspectorCrate", 0)
+    powder_crate        = config.get("containers", {}).get("PowderCrate", 0)
 
     if consegna_serial == 0: return
 
@@ -540,7 +654,11 @@ def execute_trade_loop():
         rune_idx = config.get("travel", {}).get("Runes", {}).get(rune_key, 0)
         if rune_idx == 0:
             continue
-        travel_to(rb_serial, travel_method, rune_idx)
+        # Build primary + backup: e.g. Smith1 primary, Smith2 backup
+        backup_key = rune_key[:-1] + str(int(rune_key[-1]) + 1)
+        backup_idx = config.get("travel", {}).get("Runes", {}).get(backup_key, 0)
+        indices = [rune_idx] + ([backup_idx] if backup_idx else [])
+        travel_to_with_fallback(rb_serial, travel_method, indices)
         for npc in find_all_fn():
             if npc not in npc_list:
                 npc_list.append(npc)
@@ -548,15 +666,27 @@ def execute_trade_loop():
             break  # Found NPCs here — no need to travel further
 
     if not npc_list:
-        AddToSystemJournal(f"execute_trade_loop: No {npc_label} found at any configured location.")
+        # Nudge 4 tiles in each cardinal and re-search before giving up
+        cx, cy = GetX(Self()), GetY(Self())
+        for label, dx, dy in [("North", 0, -4), ("East", 4, 0), ("West", -4, 0), ("South", 0, 4)]:
+            AddToSystemJournal(f"execute_trade_loop: No {npc_label} found — trying {label}.")
+            newMoveXY(cx + dx, cy + dy, False, 1, True)
+            Wait(800)
+            for npc in find_all_fn():
+                if npc not in npc_list:
+                    npc_list.append(npc)
+            newMoveXY(cx, cy, False, 1, True)  # return to landing tile
+            Wait(600)
+            if npc_list:
+                break
+
+    if not npc_list:
+        AddToSystemJournal(f"execute_trade_loop: No {npc_label} found after nudge search — returning to master cycle.")
         return
 
     AddToSystemJournal(f"execute_trade_loop: Found {len(npc_list)} NPC(s) to cycle through.")
 
-    request_new_bod(npc_list[0])
-    sort_new_bods(config)
-    Wait(1500)
-
+    global _first_bod_taken
     trades_completed = 0
     npc_index = 0
     consecutive_failures = 0
@@ -570,6 +700,12 @@ def execute_trade_loop():
 
         npc_pos = npc_index % len(npc_list)
         current_npc = npc_list[npc_pos]
+
+        if not _first_bod_taken:
+            request_new_bod(current_npc)
+            sort_new_bods(config)
+            Wait(1500)
+            _first_bod_taken = True
 
         if GetType(consegna_serial) == BOOK_TYPE:
             bod_to_give = extract_bod_from_book(consegna_serial)
@@ -615,13 +751,17 @@ def execute_trade_loop():
         elif cycle_type == "Tailor":
             AddToSystemJournal("Buy Cloth: OFF — skipping.")
         # Smith: ore is pre-stocked in MaterialCrate — no NPC buying needed.
-        ws1_index = config.get("travel", {}).get("Runes", {}).get("WorkSpot1", 1)
-        travel_to(rb_serial, travel_method, ws1_index)
+        ws1_index = config.get("travel", {}).get("Runes", {}).get("WorkSpot1", 0)
+        ws2_index = config.get("travel", {}).get("Runes", {}).get("WorkSpot2", 0)
+        ws_indices = [i for i in [ws1_index, ws2_index] if i]
+        if ws_indices:
+            travel_to_with_fallback(rb_serial, travel_method, ws_indices)
 
         if home_x != 0 and home_y != 0:
             newMoveXY(home_x, home_y, True, 0, True)
 
-        process_prizes_at_home(trash_serial, crate_serial, dye_tub_serial, reward_crate_serial, rb_serial, cycle_type)
+        process_prizes_at_home(trash_serial, crate_serial, dye_tub_serial, reward_crate_serial, rb_serial, cycle_type,
+                               prospector_crate=prospector_crate, powder_crate=powder_crate, config=config)
 
     AddToSystemJournal("Route Complete. Cycle successful.")
 

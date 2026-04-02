@@ -77,7 +77,7 @@ DEFAULT_CONFIG = {
     },
     "containers": {
         "MaterialCrate": 0, "TrashBarrel": 0, "ClothDyeTub": 0, "RewardCrate": 0,
-        "BodBookCrate": 0, "ConservaCrate": 0
+        "BodBookCrate": 0, "ConservaCrate": 0, "ProspectorCrate": 0, "PowderCrate": 0
     },
     "conserva_books_tailor": [0, 0, 0, 0, 0],
     "conserva_books_smith":  [0, 0, 0, 0, 0],
@@ -214,44 +214,47 @@ class BodCyclerGUI(threading.Thread):
     # --- Single Trigger Methods (Manual Testing) ---
     def trigger_supply_check(self):
         self.save_config()
-        self.set_global_status("Running (Supplies)")
+        self.set_global_status("Running (Supplies)", force=True)
         ClientPrintEx(Self(), 1, 1, "Starting Supply Check...")
         threading.Thread(target=BodCycler_CheckSupplies.check_supplies, daemon=True).start()
 
     def trigger_crafting(self):
         self.save_config()
-        self.set_global_status("Running (Crafting)")
+        self.set_global_status("Running (Crafting)", force=True)
         ClientPrintEx(Self(), 1, 1, "Starting Crafting Engine...")
         threading.Thread(target=BodCycler_Crafting.run_crafting_cycle, daemon=True).start()
 
     def trigger_trade(self):
         self.save_config()
-        self.set_global_status("Running (Trade)")
+        self.set_global_status("Running (Trade)", force=True)
         ClientPrintEx(Self(), 1, 1, "Starting NPC Trade Loop...")
         threading.Thread(target=BodCycler_NPC_Trade.execute_trade_loop, daemon=True).start()
 
     def trigger_scan(self):
         self.save_config()
-        self.set_global_status("Running (Scan)")
+        self.set_global_status("Running (Scan)", force=True)
         ClientPrintEx(Self(), 1, 1, "Scanning Conserva Book...")
         threading.Thread(target=BodCycler_Scanner.run_scanner, daemon=True).start()
 
     def trigger_assemble(self):
         self.save_config()
-        self.set_global_status("Running (Assembling)")
+        self.set_global_status("Running (Assembling)", force=True)
         ClientPrintEx(Self(), 1, 1, "Assembling Large BODs...")
         threading.Thread(target=BodCycler_Assembler.run_assembler, daemon=True).start()
 
     def trigger_take_bods(self):
         self.save_config()
-        self.set_global_status("Running (BOD Collection)")
+        self.set_global_status("Running (BOD Collection)", force=True)
         ClientPrintEx(Self(), 1, 1, "Starting BOD Collection round...")
         threading.Thread(target=self._take_bods_thread, daemon=True).start()
 
     def _take_bods_thread(self):
         try:
-            AddToSystemJournal("Manual BOD Collection: walking to standby (892, 537)...")
-            newMoveXY(892, 537, False, 1, True)
+            _home = self.config.get("home", {})
+            _hx, _hy = _home.get("X", 0), _home.get("Y", 0)
+            AddToSystemJournal(f"Manual BOD Collection: walking to standby ({_hx},{_hy})...")
+            if _hx and _hy:
+                newMoveXY(_hx, _hy, False, 1, True)
             time.sleep(2)
             Disconnect()
             BodCycler_TakeBods.run_take_bods_cycle()
@@ -370,11 +373,11 @@ class BodCyclerGUI(threading.Thread):
     def trigger_fill_backpack_bod(self):
         """Fills 1 unfilled Small BOD in backpack. Auto-combines if Large is present."""
         self.save_config()
-        self.set_global_status("Filling BOD...")
+        self.set_global_status("Filling BOD...", force=True)
         def _run():
             try:
                 import importlib, BodCycler_ConservaManager as cm; importlib.reload(cm)
-                cycle = "Tailor" if self.vars["trim_tailor"].get() else "Smith"
+                cycle = self.config.get("cycle_type", "Tailor")
                 cm.fill_next_backpack_bod(self.config, cycle)
                 self.set_global_status("Idle")
             except Exception as e:
@@ -438,7 +441,10 @@ class BodCyclerGUI(threading.Thread):
                     return
 
     def _recall_home(self):
-        """Recalls to WorkSpot1 rune then walks to config["home"] if not already there."""
+        """Recalls to WorkSpot1 rune then walks to config["home"] if not already there.
+        - Concentration disturbed → retry same rune.
+        - Location blocked → fall back to WorkSpot2 (backup rune).
+        """
         home = self.config.get("home", {})
         hx, hy = home.get("X", 0), home.get("Y", 0)
         if not hx or not hy:
@@ -448,26 +454,64 @@ class BodCyclerGUI(threading.Thread):
         if GetX(Self()) == hx and GetY(Self()) == hy:
             return  # already home
 
-        AddToSystemJournal(f"Not at home ({GetX(Self())},{GetY(Self())} vs {hx},{hy}). Recalling...")
         rb_serial = self.config.get("travel", {}).get("RuneBook", 0)
-        if rb_serial:
-            method = self.config.get("travel", {}).get("Method", "Recall")
-            rune_idx = self.config.get("travel", {}).get("Runes", {}).get("WorkSpot1", 1)
-            offset   = 5 if method == "Recall" else 7
-            btn_id   = offset + (rune_idx - 1) * 6
-            UseObject(rb_serial)
-            for _ in range(30):
-                time.sleep(0.1)
-                for i in range(GetGumpsCount()):
-                    if GetGumpID(i) == 0x554B87F3:
-                        NumGumpButton(i, btn_id)
-                        time.sleep(2.5)  # wait for recall landing
-                        break
-                else:
-                    continue
-                break
-        else:
+        if not rb_serial:
             AddToSystemJournal("_recall_home: no RuneBook configured.")
+            return
+
+        travel    = self.config.get("travel", {})
+        runes_cfg = travel.get("Runes", {})
+        method    = travel.get("Method", "Recall")
+        offset    = 5 if method == "Recall" else 7
+
+        # Try primary rune first, fall back to the "2" variant if blocked
+        rune_sequence = ["WorkSpot1", "WorkSpot2"]
+        rune_idx_iter = iter(rune_sequence)
+        current_rune  = next(rune_idx_iter)
+
+        start_x, start_y = GetX(Self()), GetY(Self())
+        AddToSystemJournal(f"Not at home ({start_x},{start_y} vs {hx},{hy}). Recalling via {current_rune}...")
+
+        while GetX(Self()) == start_x and GetY(Self()) == start_y:
+            rune_idx = runes_cfg.get(current_rune, 1)
+            btn_id   = offset + (rune_idx - 1) * 6
+
+            cast_start = datetime.now()
+            UseObject(rb_serial)
+            Wait(450)
+
+            gump_found = False
+            for i in range(GetGumpsCount()):
+                if GetGumpID(i) == 0x554B87F3:
+                    NumGumpButton(i, btn_id)
+                    gump_found = True
+                    break
+
+            if not gump_found:
+                AddToSystemJournal("_recall_home: runebook gump did not appear — retrying.")
+                Wait(1000)
+                continue
+
+            # Wait up to 3s for landing or a journal error
+            deadline = time.time() + 3.0
+            while time.time() < deadline:
+                Wait(100)
+                now = datetime.now()
+                if InJournalBetweenTimes("That location is blocked", cast_start, now) != -1:
+                    next_rune = next(rune_idx_iter, None)
+                    if next_rune:
+                        AddToSystemJournal(f"_recall_home: {current_rune} blocked — trying {next_rune}.")
+                        current_rune = next_rune
+                    else:
+                        AddToSystemJournal("_recall_home: all runes blocked — aborting.")
+                        return
+                    break
+                if InJournalBetweenTimes("Your concentration is disturbed", cast_start, now) != -1:
+                    AddToSystemJournal(f"_recall_home: concentration disturbed — retrying {current_rune}.")
+                    Wait(1500)
+                    break  # retry same rune
+                if GetX(Self()) != start_x or GetY(Self()) != start_y:
+                    break  # moved — recall succeeded
 
         newMoveXY(hx, hy, False, 1, True)
         Wait(600)
@@ -695,9 +739,10 @@ class BodCyclerGUI(threading.Thread):
 
         BG = "#ECE9D8"
         self.root.configure(bg=BG)
-        self.root.geometry("660x470")
-        self.root.minsize(580, 430)
         self.root.resizable(True, True)
+        self.root.update_idletasks()
+        self.root.geometry("")   # let Tk size to fit content
+        self.root.minsize(660, 470)
 
         try:
             if os.path.exists(ICON_FILE): self.root.iconbitmap(ICON_FILE)
@@ -871,8 +916,10 @@ class BodCyclerGUI(threading.Thread):
             ("containers", "TrashBarrel",    "Trash Barrel"),
             ("containers", "ClothDyeTub",    "Cloth Dye Tub"),
             ("containers", "RewardCrate",    "Reward Crate"),
-            ("containers", "BodBookCrate",   "BodBook Crate"),
-            ("travel",     "RuneBook",       "Rune Book"),
+            ("containers", "BodBookCrate",     "BodBook Crate"),
+            ("containers", "ProspectorCrate", "Prospector Crate"),
+            ("containers", "PowderCrate",     "Powder Crate"),
+            ("travel",     "RuneBook",        "Rune Book"),
         ]
         for cat, key, label in setup_targets:
             s      = self.config[cat].get(key, 0)

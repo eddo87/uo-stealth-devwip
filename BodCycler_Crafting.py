@@ -508,16 +508,18 @@ def check_and_pull_materials(material, qty_to_craft, item_cost, crate_serial, cy
 
 
 def recycle_invalid_items(item_id, is_except, tool_type):
-    if not is_except: 
-        return 
-        
+    # Tailor Normal BODs: don't scissors valid normal items.
+    # Smith: always smelt non-exceptionals to recoup ingots, regardless of BOD quality.
+    if not is_except and tool_type != 0x0FBC:
+        return
+
     FindType(item_id, Backpack())
     items = GetFoundList()
-    
+
     for it in items:
-        if check_abort(): 
+        if check_abort():
             break
-            
+
         if not is_item_exceptional(it):
             world_save_guard()
             
@@ -529,14 +531,13 @@ def recycle_invalid_items(item_id, is_except, tool_type):
                     TargetToObject(it)
                     Wait(800)
                     
-            elif tool_type == 0x0FBC: # Tongs (Smelt)
+            elif tool_type == 0x0FBC: # Tongs (Smelt) — use tongs directly on item
                 FindType(tool_type, Backpack())
                 if FindCount() > 0:
-                    UseObject(FindItem())
-                    idx = wait_for_gump(CRAFT_GUMP_ID)
-                    if idx != -1: 
-                        NumGumpButton(idx, 14)
-                        WaitForTarget(1500)
+                    tongs = FindItem()
+                    UseObject(tongs)
+                    WaitForTarget(2000)
+                    if TargetPresent():
                         TargetToObject(it)
                         Wait(800)
 
