@@ -6,6 +6,7 @@ import json
 import os
 import time
 import threading
+import datetime
 
 _STATS_LOCK = threading.Lock()
 _INV_LOCK   = threading.Lock()
@@ -30,6 +31,7 @@ def get_inventory_file(book_serial):
     return f"{StealthPath()}Scripts\\{CharName()}_bodcycler_inventory_{hex(book_serial)}.json"
 SUPPLY_FILE      = f"{StealthPath()}Scripts\\{CharName()}_bodcycler_supplies.json"
 PERFORMANCE_FILE = f"{StealthPath()}Scripts\\{CharName()}_bodcycler_performance.json"
+LOG_FILE         = f"{StealthPath()}Scripts\\{CharName()}_bodcycler_log.txt"
 
 # ---------------------------------------------------------------------------
 # Shared Game Constants
@@ -38,6 +40,40 @@ BOD_TYPE     = 0x2258
 BOD_BOOK_TYPE = 0x2259
 BOOK_GUMP_ID = 0x54F555DF
 NEXT_PAGE_BTN = 3
+
+# BOD color/hue identifiers
+BOD_TAILOR_COLOR = 0x0483
+BOD_SMITH_COLOR  = 0x044E
+
+# NPC & context menu
+NPC_TYPES    = [0x0190, 0x0191]   # male/female human
+CTX_BUY      = 1
+CTX_BOD      = 3
+
+# Gump button IDs
+BTN_ACCEPT_BOD = 1
+BTN_DROP_BOD_1 = 5
+COMBINE_BTN    = 2
+
+# Gump IDs
+BOD_GUMP_ID_SMALL = 0x9BADE6EA
+BOD_GUMP_ID_LARGE = 0xBE0DAD1E
+CRAFT_GUMP_ID     = 0x38920ABD
+
+# Material / item types
+CLOTH_1           = 0x1766
+CLOTH_2           = 0x1767
+BOLT_OF_CLOTH_IDS = [0x0F95, 0x0F97, 0x0F9B, 0x0F9C]
+INGOT_TYPE        = 0x1BF2
+LEATHER_TYPE      = 0x1081
+SEWING_KIT_TYPE   = 0x0F9D
+TONGS_TYPE        = 0x0FBC
+SCISSORS          = 0x0F9E
+OIL_CLOTH         = 0x175D
+SANDALS           = 0x170D
+
+# Junk items auto-trashed after smithing BOD turn-in
+SMITH_JUNK_TYPES  = [0x0F39, 0x0E86, 0x13D5, 0x13EB]
 
 # ---------------------------------------------------------------------------
 # Config I/O
@@ -52,6 +88,20 @@ def load_config():
         except Exception as e:
             AddToSystemJournal(f"Utils: Failed to load config — {e}")
     return None
+
+# ---------------------------------------------------------------------------
+# Event Logging
+# ---------------------------------------------------------------------------
+
+def log_event(event_type, message):
+    """Appends a timestamped entry to the cycle log file."""
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    line = f"[{timestamp}] [{event_type.upper()}] {message}\n"
+    try:
+        with open(LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(line)
+    except Exception as e:
+        AddToSystemJournal(f"log_event: failed to write — {e}")
 
 # ---------------------------------------------------------------------------
 # Abort Signal

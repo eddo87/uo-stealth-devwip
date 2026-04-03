@@ -1,20 +1,17 @@
 from stealth import *
 import time
 from datetime import datetime
-from BodCycler_Utils import read_stats, write_stats, wait_for_gump, load_config
+from BodCycler_Utils import (
+    read_stats, write_stats, wait_for_gump, load_config,
+    BOD_TYPE, BOD_BOOK_TYPE, BOD_TAILOR_COLOR, BOD_SMITH_COLOR,
+    CTX_BOD, BTN_ACCEPT_BOD, BOD_GUMP_ID_SMALL
+)
 
 # ---- NPC Serials ----
 NPCB = 0x0002D23A   # Blacksmith NPC
 NPCT = 0x0002D1D4   # Tailor NPC
 
 # ---- BOD / Book Constants ----
-BOD_GUMP_ID       = 0x9bade6ea  # Small BOD offer gump
-CONTEXT_MENU_ENTRY = 3           # "Bulk Order Info" context menu entry
-GUMP_ACCEPT_BTN   = 1           # Accept button on BOD gump
-BOD_TYPE          = 0x2258
-BOD_BOOK_TYPE     = 0x2259
-BOD_TAILOR_COLOR  = 0x0483
-BOD_SMITH_COLOR   = 0x044E
 BOOK_TAILOR_NAME  = 'Tailor'
 BOOK_SMITH_NAME   = 'Black'
 
@@ -72,18 +69,18 @@ def _get_bod(npc_serial: int) -> bool:
         newMoveXY(GetX(npc_serial), GetY(npc_serial), False, 2, True)
         Wait(MIN_PAUSE)
 
-    SetContextMenuHook(npc_serial, CONTEXT_MENU_ENTRY)
+    SetContextMenuHook(npc_serial, CTX_BOD)
     RequestContextMenu(npc_serial)
     Wait(MED_PAUSE)
 
     # Event-driven: poll for gump up to GUMP_TIMEOUT, then skip NPC
-    idx = wait_for_gump(BOD_GUMP_ID, GUMP_TIMEOUT)
+    idx = wait_for_gump(BOD_GUMP_ID_SMALL, GUMP_TIMEOUT)
     if idx == -1:
         AddToSystemJournal(f"_get_bod: No gump within {GUMP_TIMEOUT // 1000}s — skipping NPC.")
         return False
 
     Wait(300)
-    NumGumpButton(idx, GUMP_ACCEPT_BTN)
+    NumGumpButton(idx, BTN_ACCEPT_BOD)
     Wait(MIN_PAUSE)
     return True
 

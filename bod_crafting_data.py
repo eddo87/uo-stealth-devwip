@@ -110,7 +110,7 @@ SMITH_ITEMS = {
     "double axe":           (36, 16, 0x0F4B, 12, "iron"),   # pos 3
     "executioner's axe":    (36, 23, 0x0F45, 13, "iron"),
     "two handed axe":       (36, 37, 0x1443, 13, "iron"),
-    "war axe":              (36, 44, 0x13AF, 10, "iron"),
+    "war axe":              (36, 44, 0x13B0, 10, "iron"),
     # ── Bladed weapons (cat=29) ───────────────────────────────────────────────
     "bone harvester":       (29, 2,  0x26BB, 10, "iron"),
     "broadsword":           (29, 9,  0x0F5E, 10, "iron"),
@@ -129,7 +129,8 @@ SMITH_ITEMS = {
     "war mace":             (50, 30, 0x1407, 10, "iron"),   # pos 5
     "war hammer":           (50, 37, 0x1439, 16, "iron"),
     # ── Polearms (cat=43) ─────────────────────────────────────────────────────
-    "halberd":              (43, 16, 0x143E, 14, "iron"),   # pos 3
+    "halberd":              (43, 16, 0x143F, 14, "iron"),   # pos 3
+    "short spear":          (43, 37, 0x1403, 6, "iron"),    # pos 6
     "spear":                (43, 51, 0x0F62, 6,  "iron"),   # pos 8
     "war fork":             (43, 58, 0x1405, 12, "iron"),   # pos 9
     # ── Routing-only (btn=0 → not crafted; large BODs routed to Scartare) ────

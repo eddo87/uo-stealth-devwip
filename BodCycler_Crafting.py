@@ -13,8 +13,6 @@ if script_dir not in sys.path:
 # Import external modules
 from bod_data import categorize_items, get_prize_number
 from bod_crafting_data import TAILOR_ITEMS, SMITH_ITEMS, MATERIAL_MAP
-import BodCycler_Item_Verification as Verifier
-import BodCycler_AI_Debugger
 import BodCycler_Assembler
 
 try:
@@ -25,37 +23,21 @@ except ImportError:
 
 from BodCycler_Utils import (
     CONFIG_FILE, STATS_FILE, BOD_TYPE, BOD_BOOK_TYPE, BOOK_GUMP_ID,
-    load_config, check_abort, close_all_gumps, wait_for_gump, is_prize_enabled
+    load_config, check_abort, close_all_gumps, wait_for_gump, is_prize_enabled,
+    read_stats, write_stats, CRAFT_GUMP_ID, SCISSORS, log_event
 )
 
 # --- Config ---
 # Fallback count if Config file is unreadable
 BODS_TO_PROCESS = 5
 
-# --- Constants ---
-CRAFT_GUMP_ID = 0x38920abd
-
 
 def update_stats(crafted=0, prized_small=0, prized_large=0):
-    """Updates the persistent stats JSON file for the GUI to read."""
-    stats = {"crafted": 0, "prized_small": 0, "prized_large": 0}
-    
-    if os.path.exists(STATS_FILE):
-        try:
-            with open(STATS_FILE, "r") as f:
-                stats.update(json.load(f))
-        except Exception:
-            pass
-            
-    stats["crafted"] += crafted
-    stats["prized_small"] += prized_small
-    stats["prized_large"] += prized_large
-    
-    try:
-        with open(STATS_FILE, "w") as f:
-            json.dump(stats, f, indent=4)
-    except Exception as e:
-        AddToSystemJournal(f"Failed to save stats: {e}")
+    stats = read_stats()
+    stats["crafted"] = stats.get("crafted", 0) + crafted
+    stats["prized_small"] = stats.get("prized_small", 0) + prized_small
+    stats["prized_large"] = stats.get("prized_large", 0) + prized_large
+    write_stats(stats)
 
 
 def consolidate_materials(crate_serial):
@@ -177,7 +159,7 @@ def _swap_full_book(bbcrate, book_serial, cycle_type, config=None, config_key=No
 
     # Find an empty book (0 BODs) of the right type
     book_keyword = "tailor" if cycle_type == "Tailor" else "black"
-    FindType(BOD_BOOK_TYPE, bbcrate)
+    FindTypeEx(BOD_BOOK_TYPE, 0xFFFF, bbcrate, False)
     all_books = list(GetFoundList())
 
     for book in all_books:
@@ -222,34 +204,45 @@ def _refill_origine_from_book_crate(bbcrate, origine, cycle_type):
     bod_book_crate = bbcrate
     if not bod_book_crate:
         return 0
-    UseObject(bod_book_crate)
-    Wait(400)
-    MoveItem(origine, 1, bbcrate, 0, 0, 0)
-    Wait(600)
     book_keyword = "tailor" if cycle_type == "Tailor" else "black"
 
-    FindType(BOD_BOOK_TYPE, bod_book_crate)
+    # Open crate first so Stealth caches all contents and tooltips
+    UseObject(bod_book_crate)
+    Wait(1000)
+
+    FindTypeEx(BOD_BOOK_TYPE, 0xFFFF, bod_book_crate, False)
     all_books = list(GetFoundList())
+    AddToSystemJournal(f"BODBookCrate: scanning {len(all_books)} books for keyword '{book_keyword}'.")
 
     source_book = 0
     for book in all_books:
+        if book == origine:
+            continue
         tooltip = GetTooltip(book).lower()
+        if not tooltip:
+            ClickOnObject(book)
+            Wait(400)
+            tooltip = GetTooltip(book).lower()
+        AddToSystemJournal(f"  book {hex(book)}: '{tooltip[:80]}'")
         if book_keyword not in tooltip:
             continue
         count = _parse_book_count(tooltip)
         if count > 50:
             source_book = book
-            AddToSystemJournal(f"BODBookCrate: Found {cycle_type} book with {count} BODs — swapping.")
-            MoveItem(book, 1, Backpack(), 0, 0, 0)
-            Wait(600)
-            return source_book
+            break
         Wait(50)
 
     if not source_book:
         AddToSystemJournal(f"BODBookCrate: No {cycle_type} book with >50 BODs found.")
-        BodCycler_AI_Debugger.send_error_alert("origine_empty", "Origine", f"no reserve {cycle_type} book in BODBookCrate", False)
+        log_event("ORIGINE_EMPTY", f"No reserve {cycle_type} book with >50 BODs found in BODBookCrate — Origine cannot be refilled.")
         return 0
 
+    # Found replacement — now swap: deposit old, pull new
+    AddToSystemJournal(f"BODBookCrate: Found {cycle_type} book {hex(source_book)} — swapping.")
+    MoveItem(origine, 1, bbcrate, 0, 0, 0)
+    Wait(600)
+    MoveItem(source_book, 1, Backpack(), 0, 0, 0)
+    Wait(600)
     return source_book
 
 
@@ -395,16 +388,17 @@ def parse_bod(bod_serial, cycle_type="Tailor"):
 
 
 def is_item_exceptional(item_serial):
-    """Safely checks if an item is exceptional, waiting for server tooltips to load."""
+    """Checks if item is exceptional. Waits for the server tooltip to arrive before checking."""
     tt = GetTooltip(item_serial)
-    if tt and "exceptional" in tt.lower():
-        return True
-        
-    ClickOnObject(item_serial)
-    Wait(400) 
-    tt = GetTooltip(item_serial)
+    if not tt:
+        Wait(250)
+        tt = GetTooltip(item_serial)
+    if not tt:
+        AddToSystemJournal(f"[DEBUG] is_item_exceptional: tooltip still empty for {hex(item_serial)}")
+        return False
+    return "exceptional" in tt.lower()
     
-    return tt and "exceptional" in tt.lower()
+
 
 
 def count_valid_backpack_items(item_id, is_except):
@@ -507,39 +501,104 @@ def check_and_pull_materials(material, qty_to_craft, item_cost, crate_serial, cy
     return False
 
 
+def _get_bod_progress(bod_serial, item_name):
+    tooltip = GetTooltip(bod_serial).lower()
+    lines = [line.strip() for line in tooltip.split('|') if line.strip()]
+    for line in lines:
+        if item_name.lower() in line and ":" in line:
+            match = re.search(r':\s*(\d+)', line)
+            if match:
+                return int(match.group(1))
+    return 0
+
+
+def test_item_acceptance(bod_serial, item_serial, item_name):
+    """Combines one item into the BOD to verify it's accepted; returns True if count increases."""
+    initial_count = _get_bod_progress(bod_serial, item_name)
+    AddToSystemJournal(f"Verifying acceptance... BOD current count: {initial_count}")
+
+    count = GetGumpsCount()
+    for i in reversed(range(count)):
+        CloseSimpleGump(i)
+    Wait(500)
+
+    UseObject(bod_serial)
+    Wait(1500)
+
+    combine_btn_idx = -1
+    for i in range(GetGumpsCount()):
+        g = GetGumpInfo(i)
+        if 'GumpButtons' in g:
+            for btn in g['GumpButtons']:
+                if btn.get('ReturnValue') == 2:
+                    combine_btn_idx = i
+                    break
+        if combine_btn_idx != -1:
+            break
+
+    if combine_btn_idx != -1:
+        NumGumpButton(combine_btn_idx, 2)
+        if WaitForTarget(5000):
+            TargetToObject(item_serial)
+            Wait(1000)
+    else:
+        AddToSystemJournal("Verification Error: Could not find Combine button.")
+        return False
+
+    for _ in range(3):
+        new_count = _get_bod_progress(bod_serial, item_name)
+        if new_count > initial_count:
+            AddToSystemJournal(f"SUCCESS: BOD accepted the item ({new_count}/{initial_count}). Proceeding.")
+            return True
+        Wait(500)
+
+    AddToSystemJournal("FAILURE: BOD rejected the item ID.")
+    return False
+
+
+def _recycle_single(item_serial, tool_type):
+    """Smelts or scissors a single non-exceptional item immediately."""
+    world_save_guard()
+    if tool_type == 0x0F9D:  # Scissors (Tailor)
+        FindType(SCISSORS, Backpack())
+        if FindCount() > 0:
+            UseObject(FindItem())
+            WaitForTarget(1500)
+            TargetToObject(item_serial)
+            Wait(800)
+    elif tool_type == 0x0FBC:  # Tongs (Smith)
+        FindType(tool_type, Backpack())
+        if FindCount() > 0:
+            tongs = FindItem()
+            close_all_gumps()
+            Wait(200)
+            UseObject(tongs)
+            idx = wait_for_gump(CRAFT_GUMP_ID, 5000)
+            if idx == -1:
+                return
+            NumGumpButton(idx, 14)  # Smelt Item
+            WaitForTarget(2000)
+            if TargetPresent():
+                TargetToObject(item_serial)
+                Wait(800)
+            close_all_gumps()
+
+
 def recycle_invalid_items(item_id, is_except, tool_type):
+    """Safety-net sweep — recycles any non-exceptional items still in backpack."""
     # Tailor Normal BODs: don't scissors valid normal items.
     # Smith: always smelt non-exceptionals to recoup ingots, regardless of BOD quality.
     if not is_except and tool_type != 0x0FBC:
         return
 
-    FindType(item_id, Backpack())
+    FindTypeEx(item_id, 0x0000, Backpack(), False)
     items = GetFoundList()
 
     for it in items:
         if check_abort():
             break
-
         if not is_item_exceptional(it):
-            world_save_guard()
-            
-            if tool_type == 0x0F9D: # Scissors
-                FindType(0x0F9E, Backpack()) 
-                if FindCount() > 0:
-                    UseObject(FindItem())
-                    WaitForTarget(1500)
-                    TargetToObject(it)
-                    Wait(800)
-                    
-            elif tool_type == 0x0FBC: # Tongs (Smelt) — use tongs directly on item
-                FindType(tool_type, Backpack())
-                if FindCount() > 0:
-                    tongs = FindItem()
-                    UseObject(tongs)
-                    WaitForTarget(2000)
-                    if TargetPresent():
-                        TargetToObject(it)
-                        Wait(800)
+            _recycle_single(it, tool_type)
 
 
 def craft_items_until_done(bod_serial, tool_type, cat_identifier, item_identifier, item_name, item_id, qty_needed, is_except, mat_btn):
@@ -638,19 +697,21 @@ def craft_items_until_done(bod_serial, tool_type, cat_identifier, item_identifie
             
             if actual_graphic != current_target_id:
                 AddToSystemJournal(f"ID Mismatch Detected. Verifying...")
-                if Verifier.test_item_acceptance(bod_serial, new_serial, item_name):
+                if test_item_acceptance(bod_serial, new_serial, item_name):
                     current_target_id = actual_graphic
-                    make_last_ready = True 
+                    make_last_ready = True
                 else:
                     AddToSystemJournal("Item REJECTED by BOD. Tripping Circuit Breaker.")
-                    try:
-                        BodCycler_AI_Debugger.report_mismatch(item_name, current_target_id, actual_graphic, str(cat_identifier))
-                    except Exception as _e:
-                        AddToSystemJournal(f"report_mismatch failed: {_e}")
+                    log_event("MISMATCH", f"BOD rejected item '{item_name}': expected graphic {hex(current_target_id)}, got {hex(actual_graphic)} (category: {cat_identifier})")
                     return False
             else:
                 make_last_ready = True
-        
+
+            # Smelt/scissors immediately — don't let non-exceptionals accumulate weight.
+            if (is_except or tool_type == 0x0FBC) and not is_item_exceptional(new_serial):
+                AddToSystemJournal("[Recycle] Not exceptional — recycling immediately.")
+                _recycle_single(new_serial, tool_type)
+
         recycle_invalid_items(current_target_id, is_except, tool_type)
         made_valid = count_valid_backpack_items(current_target_id, is_except)
         #AddToSystemJournal(f"Crafting check: {made_valid}/{qty_needed} in bag.")
@@ -892,7 +953,7 @@ def run_crafting_cycle():
                 else:
                     # Resources missing — true shortage
                     AddToSystemJournal(f"[Riprova] {info['item_name']} ({info['material']}) — materials exhausted mid-craft.")
-                    BodCycler_AI_Debugger.send_error_alert("riprova", info['item_name'], info['material'], False)
+                    log_event("RIPROVA", f"Materials exhausted mid-craft: {info['item_name']} ({info['material']}) — BOD moved back to Riprova.")
                     MoveItem(bod, 0, riprova, 0, 0, 0)
                     Wait(1000)
                     close_all_gumps()

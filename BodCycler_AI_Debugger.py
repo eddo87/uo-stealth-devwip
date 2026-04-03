@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 
 # Import PyStealth to dynamically grab Character Name and Script Path
 from stealth import CharName, StealthPath
+from BodCycler_Utils import STATS_FILE, SUPPLY_FILE
 
 load_dotenv()
 
@@ -17,15 +18,12 @@ CF_API_TOKEN = os.getenv("CF_API_TOKEN")
 DISCORD_WEBHOOK = os.getenv("DISCORD_WEBHOOK")
 MODEL_FAST = os.getenv("MODEL_FAST", "@cf/meta/llama-3.1-8b-instruct-fast")
 
-# Dynamically set the file paths to match the main scripts (e.g. LA FABBRICA_bodcycler_stats.json)
 try:
-    PREFIX = f"{StealthPath()}Scripts\\{CharName()}_"
+    _prefix = f"{StealthPath()}Scripts\\{CharName()}_"
 except Exception:
-    PREFIX = "" # Fallback if somehow run entirely outside of Stealth
+    _prefix = ""
 
-STATS_FILE = f"{PREFIX}bodcycler_stats.json"
-SUPPLY_FILE = f"{PREFIX}bodcycler_supplies.json"
-LEARNING_DB = f"{PREFIX}learning_engine.json"
+LEARNING_DB = f"{_prefix}learning_engine.json"
 
 def _call_cf(model, prompt, system_instruction, max_tokens=256, timeout=10):
     """Private helper: calls Cloudflare Workers AI with exponential backoff and <think> stripping."""

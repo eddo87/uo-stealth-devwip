@@ -7,7 +7,11 @@ import time
 import BodCycler_AI_Debugger
 from tkinter import *
 from datetime import datetime
-from BodCycler_Utils import set_status, read_stats, write_stats, save_performance_snapshot, get_inventory_file, load_config
+from BodCycler_Utils import (
+    set_status, read_stats, write_stats, save_performance_snapshot,
+    get_inventory_file, load_config,
+    CONFIG_FILE, STATS_FILE, INVENTORY_FILE, SUPPLY_FILE
+)
 
 # Import the logic modules
 try:
@@ -43,10 +47,6 @@ except ImportError as e:
 
 
 # --- Configuration & Globals ---
-CONFIG_FILE = f"{StealthPath()}Scripts\\{CharName()}_bodcycler_config.json"
-SUPPLY_FILE = f"{StealthPath()}Scripts\\{CharName()}_bodcycler_supplies.json"
-STATS_FILE = f"{StealthPath()}Scripts\\{CharName()}_bodcycler_stats.json"
-INVENTORY_FILE = f"{StealthPath()}Scripts\\{CharName()}_bodcycler_inventory.json"
 ICON_FILE = f"{StealthPath()}Scripts\\bod_cycler.ico"
 
 STATS = {

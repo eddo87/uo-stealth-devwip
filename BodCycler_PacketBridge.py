@@ -6,10 +6,10 @@
 import socket
 import struct
 import time
+from BodCycler_Utils import BOOK_GUMP_ID
 
 BRIDGE_HOST = "127.0.0.1"
 BRIDGE_PORT = 48821
-BOOK_GUMP_ID = 0x54F555DF
 
 _sock = None
 

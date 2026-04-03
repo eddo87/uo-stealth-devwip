@@ -4,7 +4,6 @@ import os
 import time
 from datetime import datetime
 import BodCycler_Crafting
-import BodCycler_AI_Debugger
 try:
     from checkWorldSave import world_save_guard
 except ImportError:
@@ -17,35 +16,19 @@ from BodCycler_Utils import (
     load_config, check_abort, close_all_gumps,
     wait_for_gump, wait_for_gump_serial_change,
     read_stats, write_stats, set_status, is_prize_enabled,
-    swap_talisman
+    swap_talisman,
+    NPC_TYPES, CTX_BUY, CTX_BOD,
+    BTN_ACCEPT_BOD, BTN_DROP_BOD_1,
+    BOD_GUMP_ID_SMALL, BOD_GUMP_ID_LARGE,
+    BOD_TAILOR_COLOR, BOD_SMITH_COLOR,
+    CLOTH_1, CLOTH_2, BOLT_OF_CLOTH_IDS,
+    SCISSORS, OIL_CLOTH, SANDALS,
+    SMITH_JUNK_TYPES, log_event
 )
-
-NPC_TYPES = [0x0190, 0x0191]       # Male/Female human
-CTX_BUY = 1                        # Context Menu entry for 'Buy'
 
 # Persists across execute_trade_loop() calls — True only on the very first run
 # so the bot requests a BOD on arrival. Subsequent cycles already have one pre-fetched.
 _first_bod_taken = False
-CTX_BOD = 3                        # Context Menu entry for 'Bulk Order Info'
-BTN_ACCEPT_BOD = 1                 # 'Accept' button on BOD offer gump
-BTN_DROP_BOD_1 = 5                 # First 'Drop' button inside a BOD book
-BOD_GUMP_ID_SMALL = 0x9bade6ea    # Small BOD gump ID
-BOD_GUMP_ID_LARGE = 0xbe0dad1e    # Large BOD gump ID
-CLOTH_1 = 0x1766
-CLOTH_2 = 0x1767
-BOLT_OF_CLOTH_IDS = [0x0F95, 0x0F97, 0x0F9B, 0x0F9C]
-SCISSORS = 0x0F9E
-OIL_CLOTH = 0x175D
-SANDALS = 0x170D
-BOOK_TYPE = 0x2259                 # BOD Book type ID
-BOD_TAILOR_COLOR  = 0x0483        # Hue of Tailor Bulk Order Deeds
-BOD_SMITH_COLOR   = 0x044E        # Hue of Smith Bulk Order Deeds
-
-# Smith BOD prizes that should be trashed (low-tier / unwanted reward types)
-SMITH_JUNK_TYPES = [
-    0x0F39,  # Pick-Shovel / Pickaxe
-    0x0E86   # Pickaxe
-]
 
 def find_tailor():
     SetFindDistance(10) 
@@ -128,15 +111,25 @@ def sort_new_bods(config):
     scartare_serial = config.get("books", {}).get("Scartare", 0)
     riprova_serial  = config.get("books", {}).get("Riprova", 0)
 
-    # Auto-swap Scartare if nearly full (>=480 BODs)
     bbcrate = config.get("containers", {}).get("BodBookCrate", 0)
     cycle_type = config.get("cycle_type", "Tailor")
-    if bbcrate and scartare_serial:
-        from BodCycler_Crafting import _swap_full_book
-        new_scartare = _swap_full_book(bbcrate, scartare_serial, cycle_type, config, "Scartare")
-        if new_scartare != scartare_serial:
-            scartare_serial = new_scartare
-    cycle_type      = config.get("cycle_type", "Tailor")
+    if bbcrate:
+        from BodCycler_Crafting import _swap_full_book, _refill_origine_from_book_crate, _parse_book_count
+        # Auto-swap Scartare if nearly full (>=480 BODs) — deposit full, retrieve empty
+        if scartare_serial:
+            new_scartare = _swap_full_book(bbcrate, scartare_serial, cycle_type, config, "Scartare")
+            if new_scartare != scartare_serial:
+                scartare_serial = new_scartare
+        # Auto-refill Origine when running low (<10 BODs) — retrieve a full book (>=50) from crate
+        if origine_serial:
+            tip = GetTooltip(origine_serial).lower()
+            origine_count = _parse_book_count(tip)
+            if origine_count != -1 and origine_count < 10:
+                AddToSystemJournal(f"Origine low ({origine_count} BODs) — refilling from crate.")
+                new_origine = _refill_origine_from_book_crate(bbcrate, origine_serial, cycle_type)
+                if new_origine and new_origine != origine_serial:
+                    origine_serial = new_origine
+                    config.setdefault("books", {})["Origine"] = new_origine
 
     bod_color = BOD_SMITH_COLOR if cycle_type == "Smith" else BOD_TAILOR_COLOR
     FindTypeEx(BOD_TYPE, bod_color, Backpack(), False)
@@ -438,7 +431,7 @@ def process_prizes_at_home(trash_serial, material_crate_serial, dye_tub_serial, 
 
     # 1. Clean up trash items (both modes)
     if trash_serial != 0:
-        for junk_type in [0x175D, 0x170D]: # OIL_CLOTH (0x175D), SANDALS (0x170D)
+        for junk_type in [OIL_CLOTH, SANDALS]:
             FindType(junk_type, Backpack())
             for junk in GetFoundList():
                 if check_abort(): return
@@ -457,7 +450,7 @@ def process_prizes_at_home(trash_serial, material_crate_serial, dye_tub_serial, 
 
     # 2. Dye colored cloth and move to MATERIAL crate (Tailor only)
     if cycle_type == "Tailor" and material_crate_serial != 0:
-        for c_type in [0x1766, 0x1767]: # CLOTH_1, CLOTH_2
+        for c_type in [CLOTH_1, CLOTH_2]:
             FindType(c_type, Backpack())
             for cloth in GetFoundList():
                 if check_abort(): return
@@ -481,7 +474,7 @@ def process_prizes_at_home(trash_serial, material_crate_serial, dye_tub_serial, 
             stats = read_stats()
             stats["prizes_dropped"] = stats.get("prizes_dropped", 0) + 1
             write_stats(stats)
-            BodCycler_AI_Debugger.send_prize_notification(name)
+            log_event("PRIZE", f"Prize obtained and routed: {name}")
 
         if cycle_type == "Tailor":
             # Barbed Runic Sewing Kit: type 0x0F9D, color 0x0851
@@ -515,6 +508,17 @@ def process_prizes_at_home(trash_serial, material_crate_serial, dye_tub_serial, 
                 0x089F: (21, "Verite Runic Hammer"),
                 0x08AB: (22, "Valorite Runic Hammer"),
             }
+            def _route_prize(item, prize_id, label):
+                """Send to reward crate if prize is enabled, trash if disabled (and trash exists)."""
+                if is_prize_enabled(prize_id, config):
+                    _move_prize(item, label)
+                elif trash_serial:
+                    AddToSystemJournal(f"Trashing {label} (prize disabled).")
+                    MoveItem(item, 1, trash_serial, 0, 0, 0)
+                    Wait(600)
+                else:
+                    _move_prize(item, label)  # no trash configured — keep in reward crate
+
             FindType(0x13E3, Backpack())  # Smith's Hammer base type
             for item in GetFoundList():
                 if check_abort(): return
@@ -523,15 +527,9 @@ def process_prizes_at_home(trash_serial, material_crate_serial, dye_tub_serial, 
                     continue
                 prize_id, label = runic_hues[hue]
                 world_save_guard()
-                if is_prize_enabled(prize_id, config):
-                    _move_prize(item, label)
-                else:
-                    AddToSystemJournal(f"Trashing {label} (prize disabled).")
-                    MoveItem(item, 1, trash_serial, 0, 0, 0)
-                    Wait(600)
+                _route_prize(item, prize_id, label)
 
             # Power Scrolls: type 0x14F0 — check tooltip for "power scroll"
-            # prize_id: 115 SOP=14 (prize_id 14), 120 SOP=16 (prize_id 16)
             ps_prize_ids = {"105": 9, "110": 11, "115": 14, "120": 16}
             FindType(0x14F0, Backpack())
             for item in GetFoundList():
@@ -540,59 +538,49 @@ def process_prizes_at_home(trash_serial, material_crate_serial, dye_tub_serial, 
                 if "power scroll" not in tooltip:
                     continue
                 label = f"Power Scroll ({GetTooltip(item).split('|')[0].strip()})"
-                # Determine prize_id from skill value in tooltip
-                prize_id = None
-                for val, pid in ps_prize_ids.items():
-                    if val in tooltip:
-                        prize_id = pid
-                        break
+                prize_id = next((pid for val, pid in ps_prize_ids.items() if val in tooltip), None)
                 world_save_guard()
-                if prize_id and is_prize_enabled(prize_id, config):
-                    _move_prize(item, label)
-                elif prize_id:
-                    AddToSystemJournal(f"Trashing {label} (prize disabled).")
-                    MoveItem(item, 1, trash_serial, 0, 0, 0)
-                    Wait(600)
+                if prize_id:
+                    _route_prize(item, prize_id, label)
                 else:
-                    _move_prize(item, label)  # unknown PS value → keep
+                    _move_prize(item, label)  # unknown PS value — keep
 
             # Ancient Smith's Hammers
-            # prize_id: +10=13, +15=15, +30=18, +60=20
             ash_prize_ids = {"+10": 13, "+15": 15, "+30": 18, "+60": 20}
             FindType(0x13E4, Backpack())
             for item in GetFoundList():
                 if check_abort(): return
                 tooltip = GetTooltip(item).lower()
-                label = "Ancient Smith's Hammer"
-                prize_id = None
-                for val, pid in ash_prize_ids.items():
-                    if val in tooltip:
-                        prize_id = pid
-                        break
+                prize_id = next((pid for val, pid in ash_prize_ids.items() if val in tooltip), None)
                 world_save_guard()
-                if prize_id and is_prize_enabled(prize_id, config):
-                    _move_prize(item, label)
-                elif prize_id:
-                    AddToSystemJournal(f"Trashing {label} {val} (prize disabled).")
-                    MoveItem(item, 1, trash_serial, 0, 0, 0)
-                    Wait(600)
+                if prize_id:
+                    _route_prize(item, prize_id, "Ancient Smith's Hammer")
                 else:
-                    _move_prize(item, label)  # unknown bonus → keep
+                    _move_prize(item, "Ancient Smith's Hammer")  # unknown bonus — keep
 
     # 4. Consumables with capped crates (both cycle types)
     def _store_consumable(item_type, crate_serial, label):
         """Move item to crate if under cap, otherwise trash it."""
         FindType(item_type, Backpack())
-        for item in GetFoundList():
+        backpack_items = GetFoundList()
+        if not backpack_items:
+            return
+        if crate_serial:
+            UseObject(crate_serial)
+            Wait(800)
+            FindType(item_type, crate_serial)
+            crate_count = FindCount()
+        else:
+            crate_count = 0
+        for item in backpack_items:
             if check_abort(): return
             world_save_guard()
             if crate_serial:
-                FindType(item_type, crate_serial)
-                crate_count = FindFullQuantity()
                 if crate_count < CONSUMABLE_CRATE_CAP:
-                    AddToSystemJournal(f"Storing {label} ({crate_count+1}/{CONSUMABLE_CRATE_CAP}).")
+                    AddToSystemJournal(f"Storing {label} ({crate_count + 1}/{CONSUMABLE_CRATE_CAP}).")
                     MoveItem(item, 1, crate_serial, 0, 0, 0)
                     Wait(600)
+                    crate_count += 1
                 else:
                     AddToSystemJournal(f"{label} crate full ({CONSUMABLE_CRATE_CAP}) — trashing.")
                     if trash_serial:
@@ -707,7 +695,7 @@ def execute_trade_loop():
             Wait(1500)
             _first_bod_taken = True
 
-        if GetType(consegna_serial) == BOOK_TYPE:
+        if GetType(consegna_serial) == BOD_BOOK_TYPE:
             bod_to_give = extract_bod_from_book(consegna_serial)
         else:
             FindType(BOD_TYPE, consegna_serial)
@@ -724,7 +712,7 @@ def execute_trade_loop():
             npc_index += 1
             if consecutive_failures >= len(npc_list):
                 AddToSystemJournal("execute_trade_loop: All NPCs on cooldown or unreachable — stopping.")
-                BodCycler_AI_Debugger.send_error_alert("trade_failure", hex(bod_to_give), "All NPCs failed", False)
+                log_event("TRADE_FAILURE", f"All NPCs failed for BOD {hex(bod_to_give)} — trade loop halted.")
                 break
             Wait(500)
             continue

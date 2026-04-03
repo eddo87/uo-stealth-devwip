@@ -25,17 +25,8 @@ except ImportError:
     TAILOR_ITEMS = {}
     AddToSystemJournal("Warning: Could not import TAILOR_ITEMS for dynamic trash cleanup.")
 
-# --- Constants ---
-CRAFT_GUMP_ID = 0x38920abd
-
 # Item Types
-INGOT_TYPE = 0x1BF2
-CLOTH_TYPE_1 = 0x1766 # Regular / Bought cloth
-CLOTH_TYPE_2 = 0x1767 # Prize cloth
-LEATHER_TYPE = 0x1081
 TINKER_TOOL_TYPE = 0x1EB8
-SEWING_KIT_TYPE = 0x0F9D
-TONGS_TYPE = 0x0FBC 
 
 # Trash Configuration
 TRASH_IDS = [
@@ -71,7 +62,9 @@ from BodCycler_Utils import (
     BOD_TYPE, BOD_BOOK_TYPE, BOOK_GUMP_ID, NEXT_PAGE_BTN,
     load_config, check_abort, close_all_gumps,
     wait_for_gump, wait_for_gump_serial_change,
-    read_stats, write_stats, set_status, swap_talisman
+    read_stats, write_stats, set_status, swap_talisman,
+    CRAFT_GUMP_ID, INGOT_TYPE, CLOTH_1, CLOTH_2,
+    LEATHER_TYPE, SEWING_KIT_TYPE, TONGS_TYPE
 )
 
 def save_supplies_to_json(data):
@@ -273,7 +266,7 @@ def dye_and_store_colored_cloth(backpack_id, crate_id):
     dye_tub_id = config.get("containers", {}).get("ClothDyeTub", 0)
     
     if crate_id != 0:
-        for c_type in [CLOTH_TYPE_1, CLOTH_TYPE_2]:
+        for c_type in [CLOTH_1, CLOTH_2]:
             FindType(c_type, backpack_id)
             for cloth in GetFoundList():
                 if check_abort(): return
@@ -337,8 +330,8 @@ def check_supplies():
     
     # Count Both Types of Cloth
     cloth_total = (
-        get_item_count(CLOTH_TYPE_1, crate_id) + get_item_count(CLOTH_TYPE_1, backpack_id) +
-        get_item_count(CLOTH_TYPE_2, crate_id) + get_item_count(CLOTH_TYPE_2, backpack_id)
+        get_item_count(CLOTH_1, crate_id) + get_item_count(CLOTH_1, backpack_id) +
+        get_item_count(CLOTH_2, crate_id) + get_item_count(CLOTH_2, backpack_id)
     )
     
     # Count Leather by Color
