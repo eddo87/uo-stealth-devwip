@@ -1,0 +1,170 @@
+from stealth import *
+import time
+from datetime import datetime
+from BodCycler_Utils import (
+    read_stats, write_stats, wait_for_gump, load_config,
+    BOD_TYPE, BOD_BOOK_TYPE, BOD_TAILOR_COLOR, BOD_SMITH_COLOR,
+    CTX_BOD, BTN_ACCEPT_BOD, BOD_GUMP_ID_SMALL
+)
+
+# ---- NPC Serials ----
+NPCB = 0x0002D23A   # Blacksmith NPC
+NPCT = 0x0002D1D4   # Tailor NPC
+
+# ---- BOD / Book Constants ----
+BOOK_TAILOR_NAME  = 'Tailor'
+BOOK_SMITH_NAME   = 'Black'
+
+# ---- Timing ----
+MIN_PAUSE         = 600
+MED_PAUSE         = 1200
+GUMP_TIMEOUT      = 10_000   # ms — max wait for BOD offer gump before skipping NPC
+CONNECT_TIMEOUT   = 15       # seconds — max wait for Connected() after Connect()
+
+# ---- Collection Window ----
+COLLECT_START_MINUTE = 55    # window opens at :55 (server-aligned to hourly BOD refresh)
+COLLECT_END_MINUTE   = 5     # window closes at :05
+COLLECTION_COOLDOWN  = 3300  # 55 min in seconds — prevents re-firing in same window
+
+
+def should_collect_bods() -> bool:
+    """True when inside the hourly window (:55–:05) AND ≥55 min since last collection."""
+    m = datetime.now().minute
+    if not (m >= COLLECT_START_MINUTE or m < COLLECT_END_MINUTE):
+        return False
+    stats = read_stats()
+    last_col = stats.get("last_collection_time", 0)
+    return time.time() - last_col >= COLLECTION_COOLDOWN
+
+
+def _wait_for_connect(timeout=CONNECT_TIMEOUT) -> bool:
+    """Polls until Connected() or timeout (seconds). Returns True if connected."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if Connected():
+            return True
+        Wait(200)
+    return False
+
+
+def _find_book(book_name: str):
+    """Finds a BOD book in the backpack by name substring. Returns serial or 0."""
+    FindType(BOD_BOOK_TYPE, Backpack())
+    for book in GetFoundList():
+        if book_name in GetTooltip(book):
+            return book
+    return 0
+
+
+def _get_bod(npc_serial: int) -> bool:
+    """
+    Request a BOD from the given NPC.
+    Event-driven: polls for the gump up to GUMP_TIMEOUT ms, then skips.
+    Returns True if a BOD gump appeared and was accepted.
+    """
+    if not Connected():
+        return False
+
+    if GetDistance(npc_serial) > 2:
+        newMoveXY(GetX(npc_serial), GetY(npc_serial), False, 2, True)
+        Wait(MIN_PAUSE)
+
+    SetContextMenuHook(npc_serial, CTX_BOD)
+    RequestContextMenu(npc_serial)
+    Wait(MED_PAUSE)
+
+    # Event-driven: poll for gump up to GUMP_TIMEOUT, then skip NPC
+    idx = wait_for_gump(BOD_GUMP_ID_SMALL, GUMP_TIMEOUT)
+    if idx == -1:
+        AddToSystemJournal(f"_get_bod: No gump within {GUMP_TIMEOUT // 1000}s — skipping NPC.")
+        return False
+
+    Wait(300)
+    NumGumpButton(idx, BTN_ACCEPT_BOD)
+    Wait(MIN_PAUSE)
+    return True
+
+
+def _store_bods():
+    """Move tailor and blacksmith BODs from backpack into their respective books."""
+    tailor_book = _find_book(BOOK_TAILOR_NAME)
+    smith_book  = _find_book(BOOK_SMITH_NAME)
+
+    for color, book in [(BOD_TAILOR_COLOR, tailor_book), (BOD_SMITH_COLOR, smith_book)]:
+        if not book:
+            continue
+        FindTypeEx(BOD_TYPE, color, Backpack())
+        for bod in GetFoundList():
+            MoveItem(bod, 1, book, 0, 0, 0)
+            Wait(MIN_PAUSE)
+
+
+def run_take_bods_cycle():
+    """
+    Cycles through collector profiles sequentially (read from config).
+    Event-driven: polls for connection instead of fixed sleeps.
+    As soon as the last collector logs out, the crafter reconnects immediately.
+    Writes last_collection_time to stats on completion.
+    """
+    config = load_config()
+    if not config:
+        AddToSystemJournal("TakeBods: Could not load config. Aborting collection.")
+        return
+
+    bots_cfg = config.get("bots", {})
+    collector_profiles = bots_cfg.get("collector_profiles", [])
+    crafter_profile = bots_cfg.get("crafter_profile", "ed4")
+
+    if not collector_profiles:
+        AddToSystemJournal("TakeBods: No collector profiles configured. Skipping collection.")
+        return
+
+    AddToSystemJournal(f"=== BOD COLLECTION CYCLE START (collectors: {collector_profiles}, crafter: {crafter_profile}) ===")
+
+    for profile in collector_profiles:
+        AddToSystemJournal(f"Switching to profile: {profile}")
+        ChangeProfile(profile)
+        Wait(MIN_PAUSE)   # brief pause for profile switch
+        Connect()
+
+        if not _wait_for_connect():
+            AddToSystemJournal(f"{profile}: Could not connect within {CONNECT_TIMEOUT}s. Skipping.")
+            Disconnect()
+            continue
+
+        AddToSystemJournal(f"{profile}: Getting BOD from Tailor...")
+        _get_bod(NPCT)
+
+        AddToSystemJournal(f"{profile}: Getting BOD from Blacksmith...")
+        _get_bod(NPCB)
+
+        _store_bods()
+        hx = config.get("home", {}).get("X", 0)
+        hy = config.get("home", {}).get("Y", 0)
+        if hx and hy:
+            newMoveXY(hx, hy, False, 1, True)  # Safe spot from config["home"]
+
+        AddToSystemJournal(f"{profile}: Done. Disconnecting...")
+        Wait(MED_PAUSE)
+        Disconnect()
+
+    # Restore crafter immediately — no fixed wait window
+    Wait(MIN_PAUSE)
+    AddToSystemJournal(f"Switching back to crafter profile: {crafter_profile}")
+    ChangeProfile(crafter_profile)
+    Wait(MED_PAUSE)
+    Connect()
+
+    if not _wait_for_connect():
+        AddToSystemJournal("WARNING: Crafter could not reconnect within timeout!")
+
+    # Stamp the collection time so should_collect_bods() won't fire again for 60 min
+    stats = read_stats()
+    stats["last_collection_time"] = time.time()
+    write_stats(stats)
+
+    AddToSystemJournal("=== BOD COLLECTION CYCLE COMPLETE ===")
+
+
+if __name__ == '__main__':
+    run_take_bods_cycle()

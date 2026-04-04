@@ -8,6 +8,8 @@ __pycache__/
 venv/
 .venv/
 env/
+.claude
+.vscode/
 
 # Project Specific Logs
 *.log

@@ -49,12 +49,93 @@ TAILOR_ITEMS = {
     "studded leggings": (50, 23, 0x13DA, 12, "leather"),
     "studded tunic": (50, 30, 0x13DB, 14, "leather"),
     "studded bustier": (57, 23, 0x1C0C, 10, "leather"),
-    "studded armor": (57, 50, 0x1C02, 14, "leather"),
+    "studded armor": (57, 37, 0x1C02, 14, "leather"),
     "bone helmet": (64, 2, 0x141B, 4, "bone"),
     "bone gloves": (64, 9, 0x1417, 3, "bone"),
     "bone arms": (64, 16, 0x141D, 4, "bone"),
     "bone leggings": (64, 23, 0x141E, 10, "bone"),
     "bone armor": (64, 64, 0x1411, 12, "bone"),
+}
+
+# BLACKSMITHING DICTIONARY: Name: (CategoryCraftButton, ItemCraftButton, GraphicID, ResourceCost, "iron")
+#
+# CategoryCraftButton / ItemCraftButton are PLACEHOLDERS (0, 0) until confirmed in-game
+# via BodCycler_GumpDebug.py. Everything else (graphic IDs, costs) is from standard UO data.
+#
+# Resource costs are in ingots. Material type is always "iron" — the specific ore variant
+# (dull copper, shadow iron, etc.) is read from the BOD tooltip at runtime via parse_bod().
+#
+# PRIORITY GROUPS (fill button IDs in this order):
+#   P1 — Prize sets  : Ringmail, Chainmail, Platemail (needed for Large BOD assembly)
+#   P2 — Prize smalls: bascinet, norse helm, female plate, buckler, bronze shield
+#                      (yield runic hammers when filled exceptional+colored)
+#   P3 — Junk smalls : mace, maul, dagger, kite shields, metal shield
+#                      (no prize value — route to Scartare; button IDs optional)
+SMITH_ITEMS = {
+    # ── P1: Ringmail set (Metal Armor cat=1, page 1, items 1–4) ──────────────
+    "ringmail gloves":      (1, 2,  0x13EB, 10,  "iron"),
+    "ringmail leggings":    (1, 9,  0x13F0, 14, "iron"),
+    "ringmail sleeves":     (1, 16, 0x13EF, 14, "iron"),
+    "ringmail tunic":       (1, 23, 0x13EC, 14, "iron"),
+    # ── P1: Chainmail set (Metal Armor cat=1, page 1, items 5–7) ─────────────
+    "chainmail coif":       (1, 30, 0x13BB, 10,  "iron"),
+    "chainmail leggings":   (1, 37, 0x13BE, 16, "iron"),
+    "chainmail tunic":      (1, 44, 0x13BF, 20, "iron"),
+    # ── P1: Platemail set (Metal Armor cat=1, pages 1–2, items 8–14) ─────────
+    "platemail arms":       (1, 51, 0x1410, 18, "iron"),
+    "platemail gloves":     (1, 58, 0x1414, 12, "iron"),
+    "platemail gorget":     (1, 65, 0x1413, 10, "iron"),  # item 10, page 1
+    "platemail legs":       (1, 72, 0x1411, 18, "iron"),  # item 11, page 2
+    "platemail tunic":      (1, 79, 0x1415, 26, "iron"),  # item 12, page 2
+    # ── P2: Prize-eligible standalone smalls ─────────────────────────────────
+    # Exceptional + colored ore → yields runic hammer prizes
+    "female plate":         (1, 86, 0x1C04, 20, "iron"),  # item 13 (Metal Armor, page 2, last)
+    "bascinet":             (8, 2,  0x140C, 15, "iron"),
+    "close helmet":         (8, 9,  0x1408, 15, "iron"),
+    "helmet":               (8, 16, 0x140A, 15, "iron"),
+    "norse helm":           (8, 23, 0x140E, 10, "iron"),
+    "plate helm":           (8, 30, 0x1412, 15, "iron"),
+    "buckler":              (15, 2,  0x1B73, 10, "iron"),
+    "bronze shield":        (15, 9,  0x1B72, 10, "iron"),
+    # ── P3: Junk smalls (recognized for routing; button IDs optional) ─────────
+    # Items below never yield prizes — they go to Scartare when not exceptional iron.
+    # Fill button IDs only if you want the bot to actively craft them.
+    "heater shield":        (15, 16, 0x1B76, 12, "iron"),
+    "metal shield":         (15, 23, 0x1B7B, 14, "iron"),
+    "metal kite shield":    (15, 30, 0x1B74, 20, "iron"),
+    "tear kite shield":     (15, 37, 0x1B78, 20, "iron"),
+    # ── Axes (cat=36) ─────────────────────────────────────────────────────────
+    "axe":                  (36, 2,  0x0F49, 6,  "iron"),
+    "battle axe":           (36, 9,  0x0F47, 13, "iron"),
+    "double axe":           (36, 16, 0x0F4B, 12, "iron"),   # pos 3
+    "executioner's axe":    (36, 23, 0x0F45, 13, "iron"),
+    "two handed axe":       (36, 37, 0x1443, 13, "iron"),
+    "war axe":              (36, 44, 0x13B0, 10, "iron"),
+    # ── Bladed weapons (cat=29) ───────────────────────────────────────────────
+    "bone harvester":       (29, 2,  0x26BB, 10, "iron"),
+    "broadsword":           (29, 9,  0x0F5E, 10, "iron"),
+    "crescent blade":       (29, 16, 0x26C1, 12, "iron"),
+    "cutlass":              (29, 23, 0x1441, 8,  "iron"),
+    "dagger":               (29, 30, 0x0F51, 3,  "iron"),
+    "katana":               (29, 37, 0x13FF, 8,  "iron"),
+    "kryss":                (29, 44, 0x1401, 4,  "iron"),
+    "longsword":            (29, 51, 0x0F61, 12, "iron"),
+    "scimitar":             (29, 58, 0x13B6, 8,  "iron"),
+    "viking sword":         (29, 65, 0x13B9, 15, "iron"),
+    # ── Bashing (cat=50) ──────────────────────────────────────────────────────
+    "hammer pick":          (50, 2,  0x143D, 16,  "iron"),   # pos 1
+    "mace":                 (50, 9,  0x0F5C, 6,  "iron"),
+    "maul":                 (50, 16, 0x143B, 10, "iron"),
+    "war mace":             (50, 30, 0x1407, 10, "iron"),   # pos 5
+    "war hammer":           (50, 37, 0x1439, 16, "iron"),
+    # ── Polearms (cat=43) ─────────────────────────────────────────────────────
+    "halberd":              (43, 16, 0x143F, 14, "iron"),   # pos 3
+    "short spear":          (43, 37, 0x1403, 6, "iron"),    # pos 6
+    "spear":                (43, 51, 0x0F62, 6,  "iron"),   # pos 8
+    "war fork":             (43, 58, 0x1405, 12, "iron"),   # pos 9
+    # ── Routing-only (btn=0 → not crafted; large BODs routed to Scartare) ────
+    "bardiche":             (0,  0,  0x0F4D, 0,  "iron"),
+    "boomerang":            (0,  0,  0x27A2, 0,  "iron"),
 }
 
 MATERIAL_MAP = {

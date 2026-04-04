@@ -3,17 +3,17 @@
 # --- Reward Names ---
 prize_names = {
     # Smithy
-    1: "Durable Pick / Shovel",
-    2: "Durable Pick / Shovel (90); +1 MGloves (10)",
-    3: "GargoyleP (45); Prospector (45); +3 MGloves (10)",
-    4: "GargoyleP (40); Prospector (40); POF (20)",
-    5: "POF (90); +5 Mining Gloves (10)",
+    1: "Durable Pick-Shovel",
+    2: "Durable Pick-Shovel+1Gloves",
+    3: "GargoyleP45-Prospector45+3Gloves",
+    4: "GargoyleP40-Prospector40-POF20",
+    5: "POF (90); +5 Mining Gloves(10)",
     6: "D.C Runic",
-    7: "D.C Runic (60); Shadow Runic (40)",
+    7: "D.C Runic(60); Shadow Runic(40)",
     8: "Shadow Runic",
-    9: "105 SOP (60); Shadow Runic (30); Ore Anvil (10)",
+    9: "105 SOP;Shadow Runic;Ore Anvil",
     10: "Copper Runic",
-    11: "110 SOP (60); Copper Runic (30); Ore Anvil (10)",
+    11: "110 SOP;Copper Runic;Ore Anvil",
     12: "Bronze Runic",
     13: "+10 Ancient Smith's Hammer",
     14: "115 Power Scroll",
@@ -35,9 +35,6 @@ prize_names = {
 prize_pattern = {
     # TAILORING (Specific Targets)
     "Male Leather Set": {
-        "Normal": {
-            "Leather": {20: 23}  # <--- NEW: Large Normal Leather 20 = CBD
-        },
         "Exceptional": {
             "Spined": {20: 24}, # Barbed Kit
             "Horned": {10: 24, 15: 24, 20: 24},
@@ -45,9 +42,6 @@ prize_pattern = {
         }
     },
     "Female Leather Set": {
-        "Normal": {
-            "Leather": {20: 23}  # <--- NEW: Large Normal Leather 20 = CBD
-        },
         "Exceptional": {
             "Spined": {20: 24}, # Barbed Kit
             "Horned": {10: 24, 15: 24, 20: 24},
@@ -82,7 +76,30 @@ prize_pattern = {
         "Normal": {"Dull Copper": {10:8,15:9,20:10}, "Shadow Iron": {10:10,15:11,20:12}, "Copper": {10:12,15:12,20:13}, "Bronze": {10:13,15:13,20:14}, "Gold": {10:14,15:14,20:15}, "Agapite": {10:15,15:15,20:16}, "Verite": {10:16,15:16,20:17}, "Valorite": {10:17,15:17,20:18}},
         "Exceptional": {"Dull Copper": {10:14,15:14,20:15}, "Shadow Iron": {10:15,15:15,20:16}, "Copper": {10:16,15:16,20:17}, "Bronze": {10:17,15:17,20:18}, "Gold": {10:18,15:18,20:19}, "Agapite": {10:19,15:19,20:20}, "Verite": {10:20,15:20,20:21}, "Valorite": {10:21,15:21,20:22}}
     },
-    "Small Bods": { "Normal": {}, "Exceptional": {} }
+    # Standalone small BODs (any single item: bascinet, norse helm, buckler, mace, etc.)
+    # Prize is determined solely by material + quantity + quality — not by item type.
+    "Small Bods": {
+        "Normal": {
+            "Dull Copper": {10: 3, 15: 3, 20: 3},
+            "Shadow Iron": {10: 3, 15: 3, 20: 3},
+            "Copper":      {10: 3, 15: 3, 20: 3},
+            "Bronze":      {10: 3, 15: 3, 20: 4},
+            "Gold":        {10: 4, 15: 4, 20: 5},
+            "Agapite":     {10: 5, 15: 5, 20: 6},
+            "Verite":      {10: 6, 15: 6, 20: 7},
+            "Valorite":    {10: 7, 15: 7, 20: 8},
+        },
+        "Exceptional": {
+            "Dull Copper": {10: 4, 15: 4, 20: 5},
+            "Shadow Iron": {10: 5, 15: 5, 20: 6},
+            "Copper":      {10: 6, 15: 6, 20: 7},
+            "Bronze":      {10: 7, 15: 7, 20: 8},
+            "Gold":        {10: 8, 15: 9, 20: 10},
+            "Agapite":     {10: 10, 15: 11, 20: 12},
+            "Verite":      {10: 12, 15: 12, 20: 13},
+            "Valorite":    {10: 13, 15: 13, 20: 14},
+        }
+    }
 }
 
 # --- Component Lists ---

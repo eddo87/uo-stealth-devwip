@@ -3,20 +3,15 @@ import re
 import json
 import os
 import time
-from bod_data import *
-
-try:
-    from checkWorldSave import world_save_guard
-except ImportError:
-    def world_save_guard(): return False
-
+from bod_data import categorize_items, normalize_material, LARGE_COMPONENTS, get_prize_number, prize_names
 
 from BodCycler_Utils import (
-    CONFIG_FILE, STATS_FILE, INVENTORY_FILE, SUPPLY_FILE,
+    CONFIG_FILE, STATS_FILE, SUPPLY_FILE,
     BOD_TYPE, BOD_BOOK_TYPE, BOOK_GUMP_ID, NEXT_PAGE_BTN,
     load_config, check_abort, close_all_gumps,
     wait_for_gump, wait_for_gump_serial_change,
-    read_stats, write_stats, set_status
+    read_stats, write_stats, set_status, get_inventory_file,
+    world_save_guard
 )
 
 def get_all_elements(g):
@@ -28,7 +23,7 @@ def get_all_elements(g):
                 text = re.sub(r'<[^>]+>', '', raw).strip()
                 if text:
                     elements.append({'x': entry.get('X', 0), 'y': entry.get('Y', 0), 'text': text})
-            except: pass
+            except Exception: pass
     if 'GumpText' in g and 'Text' in g:
         for entry in g['GumpText']:
             try:
@@ -37,7 +32,7 @@ def get_all_elements(g):
                     text = str(g['Text'][text_id]).strip()
                     if text:
                         elements.append({'x': entry.get('X', 0), 'y': entry.get('Y', 0), 'text': text})
-            except: pass
+            except Exception: pass
     return elements
 
 def infer_material(item_name, current_mat):
@@ -105,7 +100,7 @@ def parse_page_visually(g):
         qty = 0
         if "/" in b_amt:
             try: qty = int(b_amt.split('/')[1].strip())
-            except: pass
+            except Exception: pass
         elif b_amt.isdigit():
             qty = int(b_amt)
 
@@ -197,11 +192,18 @@ def map_and_save_book_inventory(book_serial):
         if not g: break
         
         bods_on_page = parse_page_visually(g)
-        
-        for bod in bods_on_page:
+
+        # Read actual drop button IDs from the gump, sorted by Y (top to bottom)
+        drop_buttons = sorted(
+            [b for b in g.get('GumpButtons', []) if b.get('ReturnValue', 0) >= 5],
+            key=lambda b: b.get('Y', 0)
+        )
+        drop_btn_ids = [b['ReturnValue'] for b in drop_buttons]
+
+        for i, bod in enumerate(bods_on_page):
             bod['page'] = page_num
             bod['pos'] = global_pos
-            bod['drop_btn'] = 5 + (global_pos * 2)
+            bod['drop_btn'] = drop_btn_ids[i] if i < len(drop_btn_ids) else 5 + (i * 2)
             inventory.append(bod)
             global_pos += 1
             
@@ -216,7 +218,7 @@ def map_and_save_book_inventory(book_serial):
     # Write the entire freshly mapped array to JSON
     if not check_abort():
         try:
-            with open(INVENTORY_FILE, "w") as f:
+            with open(get_inventory_file(book_serial), "w") as f:
                 json.dump(inventory, f, indent=4)
             AddToSystemJournal(f"State Management: Successfully saved {len(inventory)} BODs to JSON.")
         except Exception as e:
@@ -243,12 +245,19 @@ def generate_progress_report(all_bods):
         ("Female Leather Set", "Spined", 20, "Exceptional", "Barbed Kit"),
         ("Female Leather Set", "Horned", 20, "Exceptional", "Barbed Kit"),
         ("Female Leather Set", "Barbed", 20, "Exceptional", "Barbed Kit"),
-        ("Male Leather Set", "Leather", 20, "Normal", "CBD"),        
-        ("Female Leather Set", "Leather", 20, "Normal", "CBD"),      
+        ("Male Leather Set", "Leather", 20, "Normal", "CBD"),
+        ("Female Leather Set", "Leather", 20, "Normal", "CBD"),
         ("Studded Set", "Leather", 20, "Exceptional", "CBD"),
         ("Studded Set", "Spined", 10, "Exceptional", "CBD"),
         ("Town Crier Set", "Cloth", 20, "Exceptional", "CBD")
     ]
+
+    _SMITH_ORES = ["Dull Copper", "Shadow Iron", "Copper", "Bronze", "Gold", "Agapite", "Verite", "Valorite"]
+    for _set in ["Ringmail", "Chainmail", "Platemail"]:
+        for _mat in _SMITH_ORES:
+            _pid = get_prize_number(_set, _mat, 20, "Exceptional")
+            _label = prize_names.get(_pid, f"Prize #{_pid}") if _pid else "?"
+            targets.append((_set, _mat, 20, "Exceptional", _label))
     
     AddToSystemJournal("=== SET PROGRESS REPORT ===")
     

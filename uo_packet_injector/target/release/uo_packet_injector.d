@@ -1,0 +1,1 @@
+C:\Users\EdoardoCiccarelli\Documents\GitHub\uo-stealth-devwip\uo_packet_injector\target\release\uo_packet_injector.dll: C:\Users\EdoardoCiccarelli\Documents\GitHub\uo-stealth-devwip\uo_packet_injector\src\lib.rs
