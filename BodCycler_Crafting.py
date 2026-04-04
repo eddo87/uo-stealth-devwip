@@ -15,16 +15,11 @@ from bod_data import categorize_items, get_prize_number
 from bod_crafting_data import TAILOR_ITEMS, SMITH_ITEMS, MATERIAL_MAP
 import BodCycler_Assembler
 
-try:
-    from checkWorldSave import world_save_guard
-except ImportError:
-    def world_save_guard():
-        return False
-
 from BodCycler_Utils import (
     CONFIG_FILE, STATS_FILE, BOD_TYPE, BOD_BOOK_TYPE, BOOK_GUMP_ID,
     load_config, check_abort, close_all_gumps, wait_for_gump, is_prize_enabled,
-    read_stats, write_stats, CRAFT_GUMP_ID, SCISSORS, log_event
+    read_stats, write_stats, CRAFT_GUMP_ID, SCISSORS, log_event,
+    world_save_guard
 )
 
 # --- Config ---
@@ -51,7 +46,7 @@ def consolidate_materials(crate_serial):
         FindType(c_type, Backpack())
         items = GetFoundList()
         if items and not found_any:
-            AddToSystemJournal("Consolidating leftover materials into crate...")
+            #AddToSystemJournal("Consolidating leftover materials into crate...")
             found_any = True
             
         for item in items:
@@ -212,8 +207,6 @@ def _refill_origine_from_book_crate(bbcrate, origine, cycle_type):
 
     FindTypeEx(BOD_BOOK_TYPE, 0xFFFF, bod_book_crate, False)
     all_books = list(GetFoundList())
-    AddToSystemJournal(f"BODBookCrate: scanning {len(all_books)} books for keyword '{book_keyword}'.")
-
     source_book = 0
     for book in all_books:
         if book == origine:
@@ -223,7 +216,6 @@ def _refill_origine_from_book_crate(bbcrate, origine, cycle_type):
             ClickOnObject(book)
             Wait(400)
             tooltip = GetTooltip(book).lower()
-        AddToSystemJournal(f"  book {hex(book)}: '{tooltip[:80]}'")
         if book_keyword not in tooltip:
             continue
         count = _parse_book_count(tooltip)
@@ -462,7 +454,7 @@ def check_and_pull_materials(material, qty_to_craft, item_cost, crate_serial, cy
         AddToSystemJournal(f"Material check: No crate configured — cannot pull {material}.")
         return False
 
-    AddToSystemJournal(f"Pulling {material} from crate...")
+    #AddToSystemJournal(f"Pulling {material} from crate...")
     UseObject(crate_serial)
     Wait(1000)
 
@@ -812,8 +804,10 @@ def run_crafting_cycle():
     scartare = config['books']['Scartare']
     riprova = config['books']['Riprova']
     crate = config['containers']['MaterialCrate']
+    trash = config.get('containers', {}).get('TrashBarrel', 0)
     bbcrate = config.get('containers', {}).get('BodBookCrate', 0)
     cycle_type = config.get("cycle_type", "Tailor")
+    trash_dc = config.get("trade", {}).get("trash_dc_bods", False)
 
     try:
         target_trades = int(config.get("trade", {}).get("target_trades", BODS_TO_PROCESS))
@@ -835,7 +829,8 @@ def run_crafting_cycle():
     except Exception:
         _tb = None
 
-    for i in range(target_trades):
+    bods_processed = 0
+    while bods_processed < target_trades:
         if check_abort():
             break
 
@@ -883,7 +878,15 @@ def run_crafting_cycle():
                 bod = result
             
         info = parse_bod(bod, cycle_type)
-        
+
+        if trash_dc and info.get('material', '').lower() == 'dull copper':
+            dest = trash if trash else scartare
+            AddToSystemJournal(f"[DC Killswitch] Trashing Dull Copper BOD {hex(bod)} ({info.get('item_name','?')}).")
+            log_event("DC_TRASH", f"Dull Copper BOD {hex(bod)} ({info.get('item_name','?')}) moved to trash in crafting cycle.")
+            MoveItem(bod, 0, dest, 0, 0, 0)
+            Wait(600)
+            continue
+
         if info['qty_needed'] <= 0:
             # BOD is already filled — still counts as a processed BOD for the cycle.
             session_crafted += 1
@@ -1007,6 +1010,8 @@ def run_crafting_cycle():
         close_all_gumps()
         if _crafted:
             update_stats(1, _small)
+
+        bods_processed += 1
 
     AddToSystemJournal("=== Crafting Cycle Complete ===")
 

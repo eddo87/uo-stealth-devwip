@@ -5,18 +5,13 @@ import os
 import time
 from bod_data import categorize_items, normalize_material, LARGE_COMPONENTS, get_prize_number, prize_names
 
-try:
-    from checkWorldSave import world_save_guard
-except ImportError:
-    def world_save_guard(): return False
-
-
 from BodCycler_Utils import (
     CONFIG_FILE, STATS_FILE, SUPPLY_FILE,
     BOD_TYPE, BOD_BOOK_TYPE, BOOK_GUMP_ID, NEXT_PAGE_BTN,
     load_config, check_abort, close_all_gumps,
     wait_for_gump, wait_for_gump_serial_change,
-    read_stats, write_stats, set_status, get_inventory_file
+    read_stats, write_stats, set_status, get_inventory_file,
+    world_save_guard
 )
 
 def get_all_elements(g):

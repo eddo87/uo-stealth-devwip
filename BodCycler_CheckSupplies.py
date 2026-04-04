@@ -11,19 +11,14 @@ script_dir = os.path.dirname(os.path.abspath(__file__))
 if script_dir not in sys.path:
     sys.path.insert(0, script_dir)
 
-# Import the save guard logic
-try:
-    from checkWorldSave import world_save_guard
-except ImportError:
-    # Fallback if file missing so script doesn't crash
-    def world_save_guard(): return False
 
 # Import crafting data for dynamic trash cleanup
 try:
-    from bod_crafting_data import TAILOR_ITEMS
+    from bod_crafting_data import TAILOR_ITEMS, SMITH_ITEMS
 except ImportError:
     TAILOR_ITEMS = {}
-    AddToSystemJournal("Warning: Could not import TAILOR_ITEMS for dynamic trash cleanup.")
+    SMITH_ITEMS = {}
+    AddToSystemJournal("Warning: Could not import crafting data for dynamic trash cleanup.")
 
 # Item Types
 TINKER_TOOL_TYPE = 0x1EB8
@@ -34,13 +29,13 @@ TRASH_IDS = [
     #0x14FC # Lockpicks
 ]
 
-# Dynamically inject all tailor item IDs into the trash list
-for key, data in TAILOR_ITEMS.items():
-    # item_id is located at index 2 of the data list based on your crafting script
-    if len(data) > 2:
-        item_id = data[2]
-        if item_id not in TRASH_IDS:
-            TRASH_IDS.append(item_id)
+# Dynamically inject all crafted item IDs into the trash list
+for items_dict in (TAILOR_ITEMS, SMITH_ITEMS):
+    for key, data in items_dict.items():
+        if len(data) > 2:
+            item_id = data[2]
+            if item_id not in TRASH_IDS:
+                TRASH_IDS.append(item_id)
 
 # Leather Colors
 LEATHER_COLORS = {
@@ -56,7 +51,6 @@ BTN_MAKE_TINKER_TOOL = 23
 BTN_MAKE_SEWING_KIT = 44  
 BTN_MAKE_TONGS = 86       # page 2 of Tools (absolute btn; scorp is btn 16 on page 1)
 
-# ✅ AFTER — one import covers everything
 from BodCycler_Utils import (
     CONFIG_FILE, STATS_FILE, INVENTORY_FILE, SUPPLY_FILE,
     BOD_TYPE, BOD_BOOK_TYPE, BOOK_GUMP_ID, NEXT_PAGE_BTN,
@@ -64,7 +58,8 @@ from BodCycler_Utils import (
     wait_for_gump, wait_for_gump_serial_change,
     read_stats, write_stats, set_status, swap_talisman,
     CRAFT_GUMP_ID, INGOT_TYPE, CLOTH_1, CLOTH_2,
-    LEATHER_TYPE, SEWING_KIT_TYPE, TONGS_TYPE
+    LEATHER_TYPE, SEWING_KIT_TYPE, TONGS_TYPE,
+    world_save_guard
 )
 
 def save_supplies_to_json(data):
@@ -148,7 +143,7 @@ def text_in_gump(text: str, button_id: int = None, timeout: int = 10, gump_id: i
 def restock_ingots(backpack_id, crate_id, min_amount=50):
     current = get_item_count(INGOT_TYPE, backpack_id, 0x0000)
     if current < min_amount:
-        AddToSystemJournal(f"Restocking Iron Ingots... (Have {current})")
+        #AddToSystemJournal(f"Restocking ingots ({current}/{min_amount})")
         # Must use color 0x0000 to grab ONLY iron ingots, not colored ore
         FindTypeEx(INGOT_TYPE, 0x0000, crate_id, False)
         ingots_crate_item = FindItem() if FindCount() > 0 else 0
@@ -170,7 +165,7 @@ def maintain_tool_stock(tool_name, type_id, make_button, bp_target, crate_target
     
     if total_have < total_need:
         needed = total_need - total_have
-        AddToSystemJournal(f"{tool_name}: Have {total_have} (BP:{bp_count}/C:{crate_count}), Need {total_need}. Crafting {needed}...")
+        #AddToSystemJournal(f"{tool_name}: {total_have}/{total_need} — crafting {needed}")
 
         if not restock_ingots(backpack_id, crate_id):
             return bp_count + crate_count
@@ -192,32 +187,38 @@ def maintain_tool_stock(tool_name, type_id, make_button, bp_target, crate_target
         while made < needed and attempts < (needed * 3):
             world_save_guard()
             attempts += 1
-            
+
+            # Re-find tinker tool if current one broke
+            FindType(TINKER_TOOL_TYPE, backpack_id)
+            if FindCount() == 0:
+                t_tool_crate = find_item_in_container(TINKER_TOOL_TYPE, crate_id)
+                if t_tool_crate:
+                    MoveItem(t_tool_crate, 1, backpack_id, 0, 0, 0)
+                    Wait(1000)
+                    tinker_tool = t_tool_crate
+                else:
+                    AddToSystemJournal("No Tinker Tools left — stopping craft.")
+                    break
+            else:
+                tinker_tool = FindItem()
+
             UseObject(tinker_tool)
             idx = wait_for_gump(CRAFT_GUMP_ID, 4000)
-            
-            if idx != -1:
-                # 1. Click Category and wait for refresh
-                if text_in_gump("Tinkering", BTN_CATEGORY_TOOLS, 5, CRAFT_GUMP_ID):
-                    wait_for_gump(CRAFT_GUMP_ID, 2000) 
-                    
-                    # 2. Click the specific tool to make
-                    if text_in_gump("Tinkering", make_button, 5, CRAFT_GUMP_ID):
-                        # 3. Dynamic Backpack Polling (No blind waits!)
-                        start_qty = count_items(type_id, backpack_id)
-                        wait_t = time.time()
-                        
-                        while time.time() - wait_t < 4.0: # 4 second timeout for craft to finish
-                            Wait(200)
-                            if count_items(type_id, backpack_id) > start_qty:
-                                made += 1
-                                break
-                    else:
-                        AddToSystemJournal("Failed to find specific item button.")
-                else:
-                    AddToSystemJournal("Failed to click Tools category.")
-            else:
-                 AddToSystemJournal("Failed to open Tinkering Gump.")
+
+            if idx == -1:
+                continue
+
+            if text_in_gump("Tinkering", BTN_CATEGORY_TOOLS, 5, CRAFT_GUMP_ID):
+                wait_for_gump(CRAFT_GUMP_ID, 2000)
+
+                if text_in_gump("Tinkering", make_button, 5, CRAFT_GUMP_ID):
+                    start_qty = count_items(type_id, backpack_id)
+                    wait_t = time.time()
+                    while time.time() - wait_t < 4.0:
+                        Wait(200)
+                        if count_items(type_id, backpack_id) > start_qty:
+                            made += 1
+                            break
                 
     bp_count = count_items(type_id, backpack_id)
     crate_count = count_items(type_id, crate_id)
@@ -253,7 +254,7 @@ def cleanup_trash():
                 if check_abort(): return
                 world_save_guard()
                 if not found_junk:
-                    AddToSystemJournal("Cleaning up leftover miscrafts and prizes...")
+                    #AddToSystemJournal("Cleaning up leftover miscrafts and prizes...")
                     found_junk = True
                 MoveItem(junk, 0, trash_id, 0, 0, 0)
                 Wait(800) # Wait for the item to drop into the barrel
@@ -273,7 +274,7 @@ def dye_and_store_colored_cloth(backpack_id, crate_id):
                 world_save_guard()
                 
                 if dye_tub_id != 0 and GetColor(cloth) != 0x0000:
-                    AddToSystemJournal(f"Dyeing colored cloth ({hex(cloth)})...")
+                    #AddToSystemJournal(f"Dyeing colored cloth ({hex(cloth)})...")
                     UseObject(dye_tub_id)
                     WaitForTarget(2000)
                     if TargetPresent():

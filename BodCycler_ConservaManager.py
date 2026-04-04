@@ -5,17 +5,13 @@ from stealth import *
 import json
 import os
 import time
+import re
 from collections import defaultdict
-
-try:
-    from checkWorldSave import world_save_guard
-except ImportError:
-    def world_save_guard(): return False
 
 from BodCycler_Utils import (
     BOD_BOOK_TYPE, BOD_TYPE, BOOK_GUMP_ID,
     get_inventory_file, load_config, check_abort, close_all_gumps,
-    is_prize_enabled, _INV_LOCK
+    is_prize_enabled, _INV_LOCK, world_save_guard
 )
 from BodCycler_Assembler import extract_bods, append_to_inventory, find_completable_sets
 from BodCycler_Scanner import map_and_save_book_inventory
@@ -87,7 +83,7 @@ def load_all_inventories(book_serials):
     return result
 
 
-def analyze_and_plan(inventories, book_serials, config, tier1_limit=8, tier2_limit=20, cycle_type="Tailor"):
+def analyze_and_plan(inventories, book_serials, config, tier1_limit=4, tier2_limit=6, cycle_type="Tailor"):
     """
     Cross-references all books. Produces a tier-based reorganization plan.
 
@@ -251,8 +247,8 @@ def analyze_and_log(config, cycle_type, mode="all"):
 
     inventories = load_all_inventories(book_serials)
     total_bods = sum(len(inv) for inv in inventories.values())
-    tier1 = config.get("conserva_manager", {}).get("keep_tier1", 8)
-    tier2 = config.get("conserva_manager", {}).get("keep_tier2", 20)
+    tier1 = config.get("conserva_manager", {}).get("keep_tier1", 4)
+    tier2 = config.get("conserva_manager", {}).get("keep_tier2", 6)
 
     AddToSystemJournal(f"=== CONSERVA ANALYZE: {len(book_serials)} {cycle_type} books ({total_bods} BODs) ===")
 
@@ -268,7 +264,27 @@ def analyze_and_log(config, cycle_type, mode="all"):
 # DLL-based Execution — extract + route via raw packet injection
 # ---------------------------------------------------------------------------
 
-BATCH_SIZE = 40  # max drops before routing to destination (backpack safety)
+BP_MAX_ITEMS = 125
+BP_SAFETY_MARGIN = 10
+
+
+def _get_batch_size():
+    """Returns how many BODs we can extract into the backpack right now.
+    Reads the backpack tooltip for current item count, subtracts safety margin.
+    Falls back to 40 if tooltip can't be parsed.
+    """
+    try:
+        tip = GetTooltip(Backpack())
+        # Matches "45/125 Items" or "45 Items" or "Contents: 45 Items"
+        m = re.search(r'(\d+)(?:/\d+)?\s*Item', tip, re.IGNORECASE)
+        if m:
+            current = int(m.group(1))
+            free = BP_MAX_ITEMS - current - BP_SAFETY_MARGIN
+            AddToSystemJournal(f"  Backpack: {current}/{BP_MAX_ITEMS} items, batch={max(1, free)}")
+            return max(1, free)
+    except Exception:
+        pass
+    return 40  # conservative fallback
 
 
 def _get_overflow_dest(config, cycle_type):
@@ -282,17 +298,23 @@ def _get_overflow_dest(config, cycle_type):
 
 
 def _ensure_bridge():
-    """Connects to the DLL packet bridge. Returns True if ready."""
+    """Connects to the DLL packet bridge and probes for the game socket handle.
+    The DLL has no auto-capture — Python must find and set the handle each session.
+    """
     try:
         import BodCycler_PacketBridge as pb
         if not pb.is_connected():
             if not pb.connect():
                 AddToSystemJournal("PacketBridge: Cannot connect. Is DLL injected? (python inject_dll.py)")
                 return False
+        # Always re-probe: never trust a stale captured handle from a previous run.
         st = pb.status()
-        if not st.get("captured"):
-            AddToSystemJournal("PacketBridge: Socket not captured. Run socket scan first.")
+        AddToSystemJournal(f"PacketBridge pre-probe status: captured={st.get('captured')} socket={st.get('socket')}")
+        h = pb.set_socket_by_probe()
+        if not h:
+            AddToSystemJournal("PacketBridge: Socket probe failed. Is Stealth connected to the server?")
             return False
+        AddToSystemJournal(f"PacketBridge: Using socket handle {h}")
         return True
     except ImportError:
         AddToSystemJournal("PacketBridge: Module not found.")
@@ -323,35 +345,34 @@ def _dll_extract_batch(book_serial, positions):
     FindType(BOD_TYPE, Backpack())
     bp_before = set(GetFoundList())
 
-    last_serial = 0
     dropped = 0
     for pos in positions:
         if check_abort():
             break
 
-        # Wait for gump serial to change
+        # Wait for gump to be present (serial stays constant — it's the book serial)
         serial = 0
-        timeout = time.time() + 2
+        timeout = time.time() + 3
         while time.time() < timeout:
             for i in range(GetGumpsCount()):
                 if GetGumpID(i) == BOOK_GUMP_ID:
-                    s = GetGumpInfo(i)["Serial"]
-                    if s != last_serial:
-                        serial = s
-                        break
+                    serial = GetGumpInfo(i)["Serial"]
+                    break
             if serial:
                 break
-            Wait(50)
+            Wait(100)
 
         if not serial:
             AddToSystemJournal(f"  Gump lost after {dropped} drops.")
             break
 
         btn = 5 + (pos * 2)
+        #AddToSystemJournal(f"  Drop: pos={pos} btn={btn} serial={hex(serial)} gump={hex(BOOK_GUMP_ID)}")
         result = pb.send_gump_response(serial, BOOK_GUMP_ID, btn)
+        #AddToSystemJournal(f"  inject_raw result={result}")
         if result > 0:
             dropped += 1
-            last_serial = serial
+            Wait(300)  # let server process the drop before next inject
         else:
             AddToSystemJournal(f"  Inject failed at pos {pos}")
             break
@@ -392,8 +413,8 @@ def execute_trim(config, cycle_type, mode="all"):
         AddToSystemJournal("No books configured.")
         return
 
-    tier1 = config.get("conserva_manager", {}).get("keep_tier1", 8)
-    tier2 = config.get("conserva_manager", {}).get("keep_tier2", 20)
+    tier1 = config.get("conserva_manager", {}).get("keep_tier1", 4)
+    tier2 = config.get("conserva_manager", {}).get("keep_tier2", 6)
     overflow_dest = _get_overflow_dest(config, cycle_type)
 
     # Tier membership from CONFIG slot positions (not filtered array indices)
@@ -475,44 +496,55 @@ def execute_trim(config, cycle_type, mode="all"):
         pending = sum(len(a) for a in actions_by_source.values())
         AddToSystemJournal(f"\n--- Iteration {iteration}: {pending} BODs to move ---")
 
-        # Process ONE source book per iteration (then rescan + re-analyze)
-        source_book = next(iter(actions_by_source))
-        actions = actions_by_source[source_book]
-        actions.sort(key=lambda a: a[0], reverse=True)
-
-        # Extract in batches from this book
+        # Process ALL source books in this iteration to avoid thrashing
+        # (processing one at a time causes the plan to reverse moves each iteration)
         moved_this_round = 0
-        affected_books = {source_book}
+        affected_books = set()
 
-        for batch_start in range(0, len(actions), BATCH_SIZE):
+        for source_book, actions in actions_by_source.items():
             if check_abort():
                 break
 
-            batch = actions[batch_start:batch_start + BATCH_SIZE]
-            positions = [a[0] for a in batch]
+            actions.sort(key=lambda a: a[0], reverse=True)
+            affected_books.add(source_book)
 
-            AddToSystemJournal(f"  Extracting {len(batch)} from {hex(source_book)} (pos {positions[0]}..{positions[-1]})")
-
-            extracted = _dll_extract_batch(source_book, positions)
-            if not extracted:
-                AddToSystemJournal("  Extraction failed. Stopping this book.")
-                break
-
-            # Route extracted BODs to destinations
-            dest_counts = defaultdict(int)
-            for _, dest in batch[:len(extracted)]:
-                dest_counts[dest] += 1
-                affected_books.add(dest)
-
-            remaining_bods = list(extracted)
-            for dest, count in dest_counts.items():
-                if not remaining_bods or check_abort():
+            action_idx = 0
+            while action_idx < len(actions):
+                if check_abort():
                     break
-                to_route = remaining_bods[:count]
-                remaining_bods = remaining_bods[count:]
-                routed = _route_bods_to_book(to_route, dest)
-                AddToSystemJournal(f"  Routed {routed} to {hex(dest)}")
-                moved_this_round += routed
+
+                batch_size = _get_batch_size()
+                if batch_size <= 0:
+                    AddToSystemJournal("  Backpack too full to extract. Route first.")
+                    break
+
+                batch = actions[action_idx:action_idx + batch_size]
+                positions = [a[0] for a in batch]
+
+                AddToSystemJournal(f"  Extracting {len(batch)} from {hex(source_book)} (pos {positions[0]}..{positions[-1]})")
+
+                extracted = _dll_extract_batch(source_book, positions)
+                if not extracted:
+                    AddToSystemJournal("  Extraction failed. Stopping this book.")
+                    break
+
+                # Route extracted BODs to destinations
+                dest_counts = defaultdict(int)
+                for _, dest in batch[:len(extracted)]:
+                    dest_counts[dest] += 1
+                    affected_books.add(dest)
+
+                remaining_bods = list(extracted)
+                for dest, count in dest_counts.items():
+                    if not remaining_bods or check_abort():
+                        break
+                    to_route = remaining_bods[:count]
+                    remaining_bods = remaining_bods[count:]
+                    routed = _route_bods_to_book(to_route, dest)
+                    AddToSystemJournal(f"  Routed {routed} to {hex(dest)}")
+                    moved_this_round += routed
+
+                action_idx += len(batch)
 
         total_moved += moved_this_round
 
@@ -1104,17 +1136,16 @@ def run_smart_trim(config, cycle_type):
     """Main entry: analyze, then execute in small batches to respect backpack limits."""
     crate = config.get("containers", {}).get("ConservaCrate", 0)
     book_serials = _get_book_serials(config, cycle_type)
-    consegna = config.get("books", {}).get("Consegna", 0)
-    scartare = config.get("books", {}).get("Scartare", 0)
-    tier1 = config.get("conserva_manager", {}).get("keep_tier1", 10)
-    tier2 = config.get("conserva_manager", {}).get("keep_tier2", 20)
+    tier1 = config.get("conserva_manager", {}).get("keep_tier1", 4)
+    tier2 = config.get("conserva_manager", {}).get("keep_tier2", 6)
+    overflow_dest = _get_overflow_dest(config, cycle_type)
 
     if not crate or not book_serials:
         AddToSystemJournal("Conserva Manager: Missing crate or book configuration.")
         return
 
     inventories = load_all_inventories(book_serials)
-    plan = analyze_and_plan(inventories, book_serials, config, tier1, tier2)
+    plan = analyze_and_plan(inventories, book_serials, config, tier1, tier2, cycle_type)
 
     for line in plan["summary"]:
         AddToSystemJournal(line)
@@ -1124,10 +1155,9 @@ def run_smart_trim(config, cycle_type):
     for bod, from_book, to_book in plan["moves"]:
         if from_book != to_book:
             actions_by_book[from_book].append(("move", bod, to_book))
-    for bod, from_book in plan["to_consegna"]:
-        actions_by_book[from_book].append(("consegna", bod, consegna))
-    for bod, from_book in plan["to_scartare"]:
-        actions_by_book[from_book].append(("scartare", bod, scartare))
+    for bod, from_book in plan.get("to_overflow", []):
+        if overflow_dest and from_book != overflow_dest:
+            actions_by_book[from_book].append(("move", bod, overflow_dest))
 
     total_processed = 0
 

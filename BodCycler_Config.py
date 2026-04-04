@@ -4,7 +4,6 @@ import json
 import copy
 import threading
 import time
-import BodCycler_AI_Debugger
 from tkinter import *
 from datetime import datetime
 from BodCycler_Utils import (
@@ -60,7 +59,8 @@ DEFAULT_CONFIG = {
     "trade": {
         "target_trades": 2,
         "buy_cloth_amount": 80,
-        "buy_cloth_enabled": True
+        "buy_cloth_enabled": True,
+        "trash_dc_bods": False
     },
     "books": {
         "Origine": 0,   "Conserva": 0,  "Riprova": 0,   "Consegna": 0,  "Scartare": 0
@@ -81,7 +81,7 @@ DEFAULT_CONFIG = {
     },
     "conserva_books_tailor": [0, 0, 0, 0, 0],
     "conserva_books_smith":  [0, 0, 0, 0, 0],
-    "conserva_manager": {"keep_tier1": 8, "keep_tier2": 20},
+    "conserva_manager": {"keep_tier1": 4, "keep_tier2": 6},
     "travel": {
         "RuneBook": 0, "Method": "Recall",
         "Runes": {
@@ -95,6 +95,10 @@ DEFAULT_CONFIG = {
         "collector_profiles": ["ed2", "ed3", "ed5"]
     },
     "prize_filter": {
+        "tailor": [23, 24],
+        "smith": [12, 17, 19, 20, 21, 22]
+    },
+    "discord_notify_prizes": {
         "tailor": [23, 24],
         "smith": [12, 17, 19, 20, 21, 22]
     }
@@ -126,6 +130,7 @@ class BodCyclerGUI(threading.Thread):
         if "cycle_type" not in self.config: self.config["cycle_type"] = "Tailor"
         if "trade" not in self.config: self.config["trade"] = {"target_trades": 2, "buy_cloth_amount": 80, "buy_cloth_enabled": True}
         if "buy_cloth_enabled" not in self.config["trade"]: self.config["trade"]["buy_cloth_enabled"] = True
+        if "trash_dc_bods" not in self.config["trade"]: self.config["trade"]["trash_dc_bods"] = False
         # Migrate legacy single 'books' dict into books_tailor if not yet split
         if "books_tailor" not in self.config:
             self.config["books_tailor"] = dict(self.config.get("books", copy.deepcopy(DEFAULT_CONFIG["books_tailor"])))
@@ -138,8 +143,11 @@ class BodCyclerGUI(threading.Thread):
         if "collector_profiles" not in self.config["bots"]: self.config["bots"]["collector_profiles"] = ["ed2", "ed3", "ed5"]
         if "conserva_books_tailor" not in self.config: self.config["conserva_books_tailor"] = [0, 0, 0, 0, 0]
         if "conserva_books_smith" not in self.config: self.config["conserva_books_smith"] = [0, 0, 0, 0, 0]
-        if "conserva_manager" not in self.config: self.config["conserva_manager"] = {"keep_tier1": 8, "keep_tier2": 20}
-        if self.config.get("conserva_manager", {}).get("keep_tier1") == 10: self.config["conserva_manager"]["keep_tier1"] = 8
+        if "conserva_manager" not in self.config: self.config["conserva_manager"] = {"keep_tier1": 4, "keep_tier2": 6}
+        if self.config.get("conserva_manager", {}).get("keep_tier1") in (8, 10): self.config["conserva_manager"]["keep_tier1"] = 4
+        if self.config.get("conserva_manager", {}).get("keep_tier2") == 20: self.config["conserva_manager"]["keep_tier2"] = 6
+        if "discord_notify_prizes" not in self.config:
+            self.config["discord_notify_prizes"] = {"tailor": [23, 24], "smith": [12, 17, 19, 20, 21, 22]}
 
     def save_config(self):
         for name, var in self.vars.items():
@@ -160,6 +168,8 @@ class BodCyclerGUI(threading.Thread):
             except ValueError: pass
         if "buy_cloth_enabled" in self.vars:
             self.config["trade"]["buy_cloth_enabled"] = bool(self.vars["buy_cloth_enabled"].get())
+        if "trash_dc_bods" in self.vars:
+            self.config["trade"]["trash_dc_bods"] = bool(self.vars["trash_dc_bods"].get())
         if "crafter_profile" in self.vars:
             self.config.setdefault("bots", {})["crafter_profile"] = self.vars["crafter_profile"].get().strip()
         if "collector_profiles" in self.vars:
@@ -825,6 +835,16 @@ class BodCyclerGUI(threading.Thread):
         Entry(f_cloth, textvariable=self.vars["buy_cloth_amount"],
               width=5, font=("Tahoma", 8)).pack(side=LEFT, padx=(8, 0))
 
+        # Trash Dull Copper BODs row
+        f_dc = Frame(t1, bg=BG)
+        f_dc.pack(fill="x", pady=2)
+        _lbl(f_dc, "Trash DC BODs:").pack(side=LEFT)
+        self.vars["trash_dc_bods"] = BooleanVar(
+            value=bool(self.config.get("trade", {}).get("trash_dc_bods", False)))
+        for text, val in (("ON", True), ("OFF", False)):
+            Radiobutton(f_dc, text=text, variable=self.vars["trash_dc_bods"], value=val,
+                        bg=BG, font=("Tahoma", 8)).pack(side=LEFT, padx=2)
+
         # Supplies panel
         f_sup = Frame(t1, bg="#DDD8CC", relief=SUNKEN, bd=1)
         f_sup.pack(fill="x", pady=(6, 2))
@@ -1107,16 +1127,21 @@ class BodCyclerGUI(threading.Thread):
         BG = "#ECE9D8"
         popup = Toplevel(self.root)
         popup.title("Prize Filter")
-        popup.geometry("300x480")
+        popup.geometry("420x480")
         popup.resizable(False, True)
         popup.grab_set()
         popup.configure(bg=BG)
 
         prize_filter = self.config.get("prize_filter", DEFAULT_CONFIG.get("prize_filter", {}))
+        notify_filter = self.config.get("discord_notify_prizes", DEFAULT_CONFIG.get("discord_notify_prizes", {}))
         tailor_on = set(prize_filter.get("tailor", [23, 24]))
         smith_on  = set(prize_filter.get("smith",  [12, 17, 19, 20, 21, 22]))
-        tailor_vars = {}
-        smith_vars  = {}
+        tailor_notify = set(notify_filter.get("tailor", [23, 24]))
+        smith_notify  = set(notify_filter.get("smith",  [12, 17, 19, 20, 21, 22]))
+        tailor_keep_vars = {}
+        smith_keep_vars  = {}
+        tailor_notify_vars = {}
+        smith_notify_vars  = {}
 
         # Scrollable content area
         canvas = Canvas(popup, bg=BG, highlightthickness=0)
@@ -1134,25 +1159,43 @@ class BodCyclerGUI(threading.Thread):
         inner.bind("<Configure>", _on_inner_resize)
         canvas.bind("<Configure>", _on_canvas_resize)
 
+        # Column headers
+        hdr = Frame(inner, bg=BG)
+        hdr.pack(fill="x", padx=6, pady=(4, 0))
+        Label(hdr, text="Prize", bg=BG, font=("Tahoma", 8, "bold"),
+              width=28, anchor="w").pack(side=LEFT)
+        Label(hdr, text="Keep", bg=BG, font=("Tahoma", 7, "bold"),
+              width=5).pack(side=LEFT)
+        Label(hdr, text="Notify", bg=BG, font=("Tahoma", 7, "bold"),
+              fg="#5865F2", width=5).pack(side=LEFT)
+
+        def _add_prize_row(parent, pid, name, keep_on, notify_on, keep_dict, notify_dict):
+            row = Frame(parent, bg=BG)
+            row.pack(fill="x", padx=6)
+            Label(row, text=f"#{pid}: {name}", bg=BG, font=("Tahoma", 8),
+                  width=28, anchor="w").pack(side=LEFT)
+            kv = IntVar(value=1 if pid in keep_on else 0)
+            keep_dict[pid] = kv
+            Checkbutton(row, variable=kv, bg=BG).pack(side=LEFT, padx=(8, 0))
+            nv = IntVar(value=1 if pid in notify_on else 0)
+            notify_dict[pid] = nv
+            Checkbutton(row, variable=nv, bg=BG).pack(side=LEFT, padx=(14, 0))
+
         # Tailor section
         Label(inner, text="── Tailor ──", bg=BG,
               font=("Tahoma", 9, "bold"), fg="#003399").pack(anchor="w", pady=(4, 2), padx=6)
         for pid in (23, 24):
             name = prize_names.get(pid, f"Prize #{pid}")
-            v = IntVar(value=1 if pid in tailor_on else 0)
-            tailor_vars[pid] = v
-            Checkbutton(inner, text=f"#{pid}: {name}", variable=v,
-                        bg=BG, font=("Tahoma", 8)).pack(anchor="w", padx=14)
+            _add_prize_row(inner, pid, name, tailor_on, tailor_notify,
+                           tailor_keep_vars, tailor_notify_vars)
 
         # Smith section
         Label(inner, text="── Smith ──", bg=BG,
               font=("Tahoma", 9, "bold"), fg="#8B0000").pack(anchor="w", pady=(8, 2), padx=6)
         for pid in range(1, 23):
             name = prize_names.get(pid, f"Prize #{pid}")
-            v = IntVar(value=1 if pid in smith_on else 0)
-            smith_vars[pid] = v
-            Checkbutton(inner, text=f"#{pid}: {name}", variable=v,
-                        bg=BG, font=("Tahoma", 8)).pack(anchor="w", padx=14)
+            _add_prize_row(inner, pid, name, smith_on, smith_notify,
+                           smith_keep_vars, smith_notify_vars)
 
         # Buttons
         f_btns = Frame(popup, bg=BG, pady=6)
@@ -1160,8 +1203,11 @@ class BodCyclerGUI(threading.Thread):
 
         def _save_close():
             self.config.setdefault("prize_filter", {})
-            self.config["prize_filter"]["tailor"] = [pid for pid, v in tailor_vars.items() if v.get()]
-            self.config["prize_filter"]["smith"]  = [pid for pid, v in smith_vars.items()  if v.get()]
+            self.config["prize_filter"]["tailor"] = [pid for pid, v in tailor_keep_vars.items() if v.get()]
+            self.config["prize_filter"]["smith"]  = [pid for pid, v in smith_keep_vars.items()  if v.get()]
+            self.config.setdefault("discord_notify_prizes", {})
+            self.config["discord_notify_prizes"]["tailor"] = [pid for pid, v in tailor_notify_vars.items() if v.get()]
+            self.config["discord_notify_prizes"]["smith"]  = [pid for pid, v in smith_notify_vars.items()  if v.get()]
             self.save_config()
             popup.destroy()
 

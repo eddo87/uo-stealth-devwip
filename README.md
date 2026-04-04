@@ -93,7 +93,7 @@ By using importlib.reload() within the Master Cycle, the orchestrator can update
 
 World Save Guard
 
-Every module integrates with checkWorldSave.py. This prevents the "Gump Freeze" common on ServUO/RunUO shards where an action performed during a world save is lost, but the script continues as if it succeeded.
+Every module calls world_save_guard() from BodCycler_Utils.py before game actions. Detects the 15s warning, keeps working for ~13s, then blocks until save completes (~2s). Also handles connection loss (auto-reconnect) and daily server restart (recall home, sleep, reconnect).
 
 BOD Routing Safety (sort_new_bods)
 

@@ -23,15 +23,13 @@ It uses a **Central Orchestrator** pattern where a primary Python Tkinter GUI ma
 ## **🗺️ Component Map**
 
 * BodCycler\_Config.py: **The Brain.** Master loop, GUI state, hot-reloading.
-* BodCycler\_Utils.py: **Infrastructure.** Paths, JSON I/O, thread-safe writers, gump helpers.
+* BodCycler\_Utils.py: **Infrastructure.** Paths, JSON I/O, thread-safe writers, gump helpers, world save guard, connection guard, Discord prize notifications.
 * BodCycler\_Crafting.py: **The Producer.** BOD extraction, item crafting, book replenishment.
 * BodCycler\_NPC\_Trade.py: **The Merchant.** Travel, NPC trading, auto-purchasing.
 * BodCycler\_Scanner.py: **The Data Entry.** Visual parser for BOD books \-\> inventory.json.
 * BodCycler\_Assembler.py: **The Builder.** Matches Small to Large BODs using JSON logic.
 * BodCycler\_ConservaManager.py: **The Organizer.** Multi-book Conserva management, tier-based reorganization, RE integration for fast drops.
 * BodCycler\_TakeBods.py: **The Collector.** Multi-bot profile switcher.
-* BodCycler\_AI\_Debugger.py: **The Sentinel.** Cloudflare AI \+ Discord alerts.
-* checkWorldSave.py: **The Guard.** Pauses execution during server saves/restarts.
 
 ## **🏗️ Architecture & State Pipeline**
 

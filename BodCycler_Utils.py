@@ -7,14 +7,190 @@ import os
 import time
 import threading
 import datetime
+import requests
 
 _STATS_LOCK = threading.Lock()
 _INV_LOCK   = threading.Lock()
 
-try:
-    from checkWorldSave import world_save_guard
-except ImportError:
-    def world_save_guard(): return False
+# ---------------------------------------------------------------------------
+# World Save Guard + Connection Guard + Server Restart
+# ---------------------------------------------------------------------------
+
+_ws_state = "idle"
+_ws_next_scan_at = datetime.datetime.min
+_ws_armed_at = datetime.datetime.min
+_ws_cooldown_until = datetime.datetime.min
+_ws_last_restart_date = None
+
+# Save timing: check minutes 0-2 and 30-32 (covers drift from :31 down to :00)
+_SAVE_MINUTES = (0, 1, 2, 30, 31, 32)
+_SCAN_EVERY_MS = 250
+_LOOKBACK_WARNING_SEC = 30
+_LOOKBACK_SAVE_SEC = 20
+_SAVE_COMPLETE_TIMEOUT_MS = 12000
+_POST_SAVE_GRACE_MS = 500
+_COOLDOWN_AFTER_SAVE_SEC = 20
+
+# Server restart window
+_RESTART_HOUR = 6
+_RESTART_MINUTE = 55
+_RECONNECT_HOUR = 7
+_RECONNECT_MINUTE = 5
+
+
+def _seen(text, lookback_sec):
+    """True if 'text' appeared in journal within last lookback_sec seconds."""
+    now = datetime.datetime.now()
+    since = now - datetime.timedelta(seconds=lookback_sec)
+    return InJournalBetweenTimes(text, since, now) > 0
+
+
+def _wait_until_save_complete(timeout_ms):
+    """Blocks until 'World save complete' appears, or timeout."""
+    deadline = datetime.datetime.now() + datetime.timedelta(milliseconds=timeout_ms)
+    while datetime.datetime.now() < deadline:
+        if _seen("World save complete", _LOOKBACK_SAVE_SEC):
+            return True
+        Wait(50)
+    return False
+
+
+def connection_guard():
+    """Blocks until Connected(). Returns True if a reconnection was needed."""
+    if Connected():
+        return False
+    AddToSystemJournal("Connection lost! Reconnecting...")
+    while not Connected():
+        Connect()
+        Wait(10000)
+    AddToSystemJournal("Reconnected. Settling...")
+    Wait(5000)
+    return True
+
+
+def check_server_restart():
+    """Call between BODs. Handles the daily server restart window (recall home, sleep, reconnect)."""
+    global _ws_last_restart_date
+    now = datetime.datetime.now()
+    minutes_now = now.hour * 60 + now.minute
+    restart_start = _RESTART_HOUR * 60 + _RESTART_MINUTE
+    restart_end = _RECONNECT_HOUR * 60 + _RECONNECT_MINUTE
+
+    if restart_start <= minutes_now < restart_end:
+        if _ws_last_restart_date and _ws_last_restart_date.date() == now.date():
+            return False
+
+        AddToSystemJournal("Server restart imminent. Clean exit protocol...")
+        config = load_config() or {}
+
+        rb_serial = config.get("travel", {}).get("RuneBook", 0)
+        method = config.get("travel", {}).get("Method", "Recall")
+        ws1_idx = config.get("travel", {}).get("Runes", {}).get("WorkSpot1", 1)
+
+        if rb_serial > 0:
+            AddToSystemJournal(f"Recalling to WorkSpot1 (Rune {ws1_idx}).")
+            offset = 5 if method == "Recall" else 7
+            btn_id = offset + (ws1_idx - 1) * 6
+            UseObject(rb_serial)
+            Wait(1500)
+            for i in range(GetGumpsCount()):
+                if GetGumpID(i) == 0x554B87F3:
+                    NumGumpButton(i, btn_id)
+                    break
+            Wait(5000)
+
+        home_x = config.get("home", {}).get("X", 0)
+        home_y = config.get("home", {}).get("Y", 0)
+        if home_x > 0 and home_y > 0:
+            NewMoveXY(home_x, home_y, True, 0, True)
+            Wait(1000)
+
+        AddToSystemJournal("Waiting for server disconnect...")
+        while Connected():
+            Wait(1000)
+        _ws_last_restart_date = datetime.datetime.now()
+
+        AddToSystemJournal(f"Sleeping until {_RECONNECT_HOUR:02d}:{_RECONNECT_MINUTE:02d}...")
+        while True:
+            Wait(5000)
+            if os.path.exists(STATS_FILE):
+                try:
+                    with open(STATS_FILE, "r") as f:
+                        if json.load(f).get("status") == "Stopped":
+                            return True
+                except Exception:
+                    pass
+            curr_mins = datetime.datetime.now().hour * 60 + datetime.datetime.now().minute
+            if curr_mins >= restart_end:
+                break
+
+        connection_guard()
+        return True
+
+    return False
+
+
+def world_save_guard():
+    """Call before each game action. Handles connection, world saves, and server restarts.
+    Returns True if a save/restart was handled (caller should re-check state).
+    """
+    global _ws_state, _ws_next_scan_at, _ws_armed_at, _ws_cooldown_until
+
+    connection_guard()
+
+    now = datetime.datetime.now()
+
+    if now < _ws_cooldown_until:
+        return False
+    if now < _ws_next_scan_at:
+        return False
+    _ws_next_scan_at = now + datetime.timedelta(milliseconds=_SCAN_EVERY_MS)
+
+    m = now.minute
+    in_time_window = (m in _SAVE_MINUTES)
+    if _ws_state == "idle" and not in_time_window:
+        return False
+
+    if _ws_state == "idle":
+        if _seen("The world will save in 15 seconds", _LOOKBACK_WARNING_SEC):
+            AddToSystemJournal("[WorldSave] 15s warning detected — armed.")
+            _ws_state = "armed"
+            _ws_armed_at = now
+            return False
+
+        if _seen("The world is saving, please wait", _LOOKBACK_SAVE_SEC):
+            _ws_state = "saving"
+
+    if _ws_state == "armed":
+        if _seen("The world is saving, please wait", _LOOKBACK_SAVE_SEC):
+            _ws_state = "saving"
+        elif (now - _ws_armed_at).total_seconds() >= 13:
+            AddToSystemJournal("[WorldSave] Save imminent — holding.")
+            while not _seen("The world is saving, please wait", _LOOKBACK_SAVE_SEC):
+                if (datetime.datetime.now() - _ws_armed_at).total_seconds() > 25:
+                    AddToSystemJournal("[WorldSave] Warning expired without save — back to idle.")
+                    _ws_state = "idle"
+                    return False
+                Wait(100)
+            _ws_state = "saving"
+        elif (now - _ws_armed_at).total_seconds() > 25:
+            AddToSystemJournal("[WorldSave] Warning expired without save — back to idle.")
+            _ws_state = "idle"
+            return False
+        else:
+            return False
+
+    if _ws_state == "saving":
+        AddToSystemJournal("[WorldSave] Save in progress — waiting...")
+        Wait(2000)
+        _wait_until_save_complete(_SAVE_COMPLETE_TIMEOUT_MS)
+        Wait(_POST_SAVE_GRACE_MS)
+        AddToSystemJournal("[WorldSave] Save complete — resuming.")
+        _ws_state = "idle"
+        _ws_cooldown_until = datetime.datetime.now() + datetime.timedelta(seconds=_COOLDOWN_AFTER_SAVE_SEC)
+        return True
+
+    return False
 
 # ---------------------------------------------------------------------------
 # Shared File Paths
@@ -73,7 +249,7 @@ OIL_CLOTH         = 0x175D
 SANDALS           = 0x170D
 
 # Junk items auto-trashed after smithing BOD turn-in
-SMITH_JUNK_TYPES  = [0x0F39, 0x0E86, 0x13D5, 0x13EB]
+SMITH_JUNK_TYPES  = [0x0F39, 0x0E86, 0x13D5, 0x13EB, 0x13C6]
 
 # ---------------------------------------------------------------------------
 # Config I/O
@@ -102,6 +278,35 @@ def log_event(event_type, message):
             f.write(line)
     except Exception as e:
         AddToSystemJournal(f"log_event: failed to write — {e}")
+
+
+def send_prize_notification(prize_name, prize_id, config):
+    """Sends a Discord alert when a prize is moved to the Reward Crate.
+    Only fires if prize_id is in config['discord_notify_prizes'] and DISCORD_WEBHOOK is set in .env.
+    """
+    if not prize_id:
+        return
+    cycle_type = config.get("cycle_type", "Tailor")
+    key = "tailor" if cycle_type == "Tailor" else "smith"
+    notify_list = config.get("discord_notify_prizes", {}).get(key, [])
+    if prize_id not in notify_list:
+        return
+    webhook = os.getenv("DISCORD_WEBHOOK", "")
+    if not webhook:
+        return
+    payload = {
+        "username": "BOD Cycler",
+        "embeds": [{
+            "title": "\U0001f3c6 Prize Secured!",
+            "description": f"**{prize_name}** dropped into the Reward Crate.",
+            "color": 16766720,
+            "footer": {"text": datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+        }]
+    }
+    try:
+        requests.post(webhook, json=payload, timeout=10)
+    except Exception:
+        pass
 
 # ---------------------------------------------------------------------------
 # Abort Signal
@@ -280,8 +485,6 @@ def swap_talisman(cycle_type, config):
     Lookup order: stored serial in config → tooltip keyword scan in backpack.
     Logs + Discord alert if not found; returns True on success, False on failure.
     """
-    import BodCycler_AI_Debugger
-
     keyword       = "tailoring" if cycle_type == "Tailor" else "blacksmithing"
     target_serial = config.get("talismans", {}).get(cycle_type, 0)
     layer         = TalismanLayer()
@@ -297,11 +500,7 @@ def swap_talisman(cycle_type, config):
     if not target_serial:
         msg = f"[Talisman] No {cycle_type} talisman found — continuing without swap."
         AddToSystemJournal(msg)
-        try:
-            #BodCycler_AI_Debugger.send_error_alert("talisman_missing", cycle_type, msg, False)
-            Misc.Pause(10)
-        except Exception:
-            pass
+        log_event("TALISMAN_FAIL", msg)
         return False
 
     # Already wearing the right one
@@ -320,8 +519,5 @@ def swap_talisman(cycle_type, config):
 
     msg = f"[Talisman] Failed to equip {cycle_type} talisman ({hex(target_serial)})."
     AddToSystemJournal(msg)
-    try:
-        BodCycler_AI_Debugger.send_error_alert("talisman_equip_fail", cycle_type, msg, False)
-    except Exception:
-        pass
+    log_event("TALISMAN_FAIL", msg)
     return False

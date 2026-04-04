@@ -9,6 +9,7 @@ venv/
 .venv/
 env/
 .claude
+.vscode/
 
 # Project Specific Logs
 *.log

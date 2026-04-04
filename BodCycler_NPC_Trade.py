@@ -4,11 +4,6 @@ import os
 import time
 from datetime import datetime
 import BodCycler_Crafting
-try:
-    from checkWorldSave import world_save_guard
-except ImportError:
-    def world_save_guard(): return False
-
 
 from BodCycler_Utils import (
     CONFIG_FILE, STATS_FILE, INVENTORY_FILE, SUPPLY_FILE,
@@ -16,14 +11,14 @@ from BodCycler_Utils import (
     load_config, check_abort, close_all_gumps,
     wait_for_gump, wait_for_gump_serial_change,
     read_stats, write_stats, set_status, is_prize_enabled,
-    swap_talisman,
+    swap_talisman, world_save_guard,
     NPC_TYPES, CTX_BUY, CTX_BOD,
     BTN_ACCEPT_BOD, BTN_DROP_BOD_1,
     BOD_GUMP_ID_SMALL, BOD_GUMP_ID_LARGE,
     BOD_TAILOR_COLOR, BOD_SMITH_COLOR,
     CLOTH_1, CLOTH_2, BOLT_OF_CLOTH_IDS,
     SCISSORS, OIL_CLOTH, SANDALS,
-    SMITH_JUNK_TYPES, log_event
+    SMITH_JUNK_TYPES, log_event, send_prize_notification
 )
 
 # Persists across execute_trade_loop() calls — True only on the very first run
@@ -67,36 +62,34 @@ def find_all_tailors():
 
 def find_smith():
     SetFindDistance(10)
-    armorers, smiths = [], []
+    smiths, weaponsmiths = [], []
     for npc_type in NPC_TYPES:
         FindTypeEx(npc_type, 0xFFFF, Ground(), False)
         for npc in GetFoundList():
-            name  = GetName(npc).lower()
-            title = GetAltName(npc).lower()
-            if 'armorer' in name or 'armorer' in title:
-                armorers.append(npc)
-            elif 'blacksmith' in name or 'blacksmith' in title:
+            combined = (GetName(npc) + ' ' + GetAltName(npc)).lower()
+            if 'blacksmith' in combined:
                 smiths.append(npc)
-    if armorers: return armorers[0]
-    if smiths:   return smiths[0]
+            elif 'weaponsmith' in combined:
+                weaponsmiths.append(npc)
+    if smiths: return smiths[0]
+    if weaponsmiths: return weaponsmiths[0]
     return 0
 
 def find_all_smiths():
-    """Returns all blacksmith/armorer NPCs found within search distance."""
+    """Returns all blacksmith/weaponsmith NPCs found within search distance."""
     SetFindDistance(12)
-    armorers, smiths = [], []
+    smiths, weaponsmiths = [], []
     for npc_type in NPC_TYPES:
         FindTypeEx(npc_type, 0xFFFF, Ground(), False)
         for npc in GetFoundList():
-            name  = GetName(npc).lower()
-            title = GetAltName(npc).lower()
-            if 'guildmaster' in name or 'guildmaster' in title:
+            combined = (GetName(npc) + ' ' + GetAltName(npc)).lower()
+            if 'guildmaster' in combined:
                 continue
-            if 'armorer' in name or 'armorer' in title:
-                armorers.append(npc)
-            elif 'blacksmith' in name or 'blacksmith' in title:
+            if 'blacksmith' in combined:
                 smiths.append(npc)
-    return armorers + smiths
+            elif 'weaponsmith' in combined:
+                weaponsmiths.append(npc)
+    return smiths + weaponsmiths
 
 def move_to_npc(npc):
     if npc > 0 and GetDistance(npc) > 1:
@@ -111,43 +104,33 @@ def sort_new_bods(config):
     scartare_serial = config.get("books", {}).get("Scartare", 0)
     riprova_serial  = config.get("books", {}).get("Riprova", 0)
 
-    bbcrate = config.get("containers", {}).get("BodBookCrate", 0)
     cycle_type = config.get("cycle_type", "Tailor")
-    if bbcrate:
-        from BodCycler_Crafting import _swap_full_book, _refill_origine_from_book_crate, _parse_book_count
-        # Auto-swap Scartare if nearly full (>=480 BODs) — deposit full, retrieve empty
-        if scartare_serial:
-            new_scartare = _swap_full_book(bbcrate, scartare_serial, cycle_type, config, "Scartare")
-            if new_scartare != scartare_serial:
-                scartare_serial = new_scartare
-        # Auto-refill Origine when running low (<10 BODs) — retrieve a full book (>=50) from crate
-        if origine_serial:
-            tip = GetTooltip(origine_serial).lower()
-            origine_count = _parse_book_count(tip)
-            if origine_count != -1 and origine_count < 10:
-                AddToSystemJournal(f"Origine low ({origine_count} BODs) — refilling from crate.")
-                new_origine = _refill_origine_from_book_crate(bbcrate, origine_serial, cycle_type)
-                if new_origine and new_origine != origine_serial:
-                    origine_serial = new_origine
-                    config.setdefault("books", {})["Origine"] = new_origine
-
     bod_color = BOD_SMITH_COLOR if cycle_type == "Smith" else BOD_TAILOR_COLOR
     FindTypeEx(BOD_TYPE, bod_color, Backpack(), False)
     loose_bods = list(GetFoundList())
     
     if not loose_bods: return
         
-    AddToSystemJournal(f"Sorting {len(loose_bods)} new BOD(s) from Backpack...")
+    #AddToSystemJournal(f"Sorting {len(loose_bods)} new BOD(s) from Backpack...")
     
+    trash_dc = config.get("trade", {}).get("trash_dc_bods", False)
+
     for bod in loose_bods:
         world_save_guard()
-        
+
         info = BodCycler_Crafting.parse_bod(bod, cycle_type)
-        
+
+        if trash_dc and info and info.get('material', '').lower() == 'dull copper':
+            AddToSystemJournal(f"[DC Killswitch] Dropping Dull Copper BOD {hex(bod)} on floor.")
+            log_event("DC_TRASH", f"Dull Copper BOD {hex(bod)} ({info.get('item_name','?')}) dropped at player position.")
+            DropHere(bod)
+            Wait(600)
+            continue
+
         dest_book = 0
         dest_name = ""
         parsed_bod = None
-        
+
         if not info or info.get('item_name', '').lower() == "unknown":
             AddToSystemJournal(f"WARNING: Unrecognised BOD {hex(bod)} — routing to Riprova for manual review.")
             if riprova_serial != 0:
@@ -467,7 +450,7 @@ def process_prizes_at_home(trash_serial, material_crate_serial, dye_tub_serial, 
     # 3. Move high-value prizes to REWARD crate
     if reward_crate_serial != 0:
 
-        def _move_prize(item, name):
+        def _move_prize(item, name, prize_id=None):
             AddToSystemJournal(f"Moving {name} to Reward Crate.")
             MoveItem(item, 0, reward_crate_serial, 0, 0, 0)
             Wait(800)
@@ -475,6 +458,11 @@ def process_prizes_at_home(trash_serial, material_crate_serial, dye_tub_serial, 
             stats["prizes_dropped"] = stats.get("prizes_dropped", 0) + 1
             write_stats(stats)
             log_event("PRIZE", f"Prize obtained and routed: {name}")
+            if prize_id is not None:
+                try:
+                    send_prize_notification(name, prize_id, config)
+                except Exception:
+                    pass
 
         if cycle_type == "Tailor":
             # Barbed Runic Sewing Kit: type 0x0F9D, color 0x0851
@@ -483,7 +471,7 @@ def process_prizes_at_home(trash_serial, material_crate_serial, dye_tub_serial, 
                 if check_abort(): return
                 if GetColor(item) == 0x0851:
                     world_save_guard()
-                    _move_prize(item, "Barbed Runic Kit")
+                    _move_prize(item, "Barbed Runic Kit", prize_id=24)
 
             # Clothing Bless Deed: type 0x14F0, color 0x0000, tooltip check
             FindType(0x14F0, Backpack())
@@ -492,7 +480,7 @@ def process_prizes_at_home(trash_serial, material_crate_serial, dye_tub_serial, 
                 if GetColor(item) == 0x0000:
                     if "clothing bless deed" in GetTooltip(item).lower():
                         world_save_guard()
-                        _move_prize(item, "Clothing Bless Deed")
+                        _move_prize(item, "Clothing Bless Deed", prize_id=23)
 
         elif cycle_type == "Smith":
             # Runic Hammers: type 0x13E3, any non-zero color = a runic tier.
@@ -511,13 +499,13 @@ def process_prizes_at_home(trash_serial, material_crate_serial, dye_tub_serial, 
             def _route_prize(item, prize_id, label):
                 """Send to reward crate if prize is enabled, trash if disabled (and trash exists)."""
                 if is_prize_enabled(prize_id, config):
-                    _move_prize(item, label)
+                    _move_prize(item, label, prize_id=prize_id)
                 elif trash_serial:
                     AddToSystemJournal(f"Trashing {label} (prize disabled).")
                     MoveItem(item, 1, trash_serial, 0, 0, 0)
                     Wait(600)
                 else:
-                    _move_prize(item, label)  # no trash configured — keep in reward crate
+                    _move_prize(item, label, prize_id=prize_id)  # no trash configured — keep in reward crate
 
             FindType(0x13E3, Backpack())  # Smith's Hammer base type
             for item in GetFoundList():

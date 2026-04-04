@@ -28,6 +28,22 @@ def connect():
         return False
 
 
+def set_socket_by_probe():
+    """Finds the game socket by brute-force: tries handles 4-10000 step 4,
+    sends a 0x73 ping via the DLL, first successful send = game socket.
+    Returns the winning handle or 0.
+    """
+    ping = b"\x73" + b"\x00" * 36  # harmless UO ping packet
+    for h in range(4, 10000, 4):
+        if set_socket(h):
+            result = inject_raw(ping)
+            if result is not None and result > 0:
+                AddToSystemJournal(f"PacketBridge: Game socket found at handle {h}")
+                return h
+    AddToSystemJournal("PacketBridge: Socket probe exhausted — handle not found.")
+    return 0
+
+
 def disconnect():
     """Closes the TCP connection."""
     global _sock
