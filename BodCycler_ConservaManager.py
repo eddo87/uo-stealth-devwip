@@ -89,8 +89,8 @@ def analyze_and_plan(inventories, book_serials, config, tier1_limit=4, tier2_lim
 
     Three tiers — no Consegna/Scartare:
       - Tier 1 (Best, book[0]): max tier1_limit per item per set, wanted prizes only
-      - Tier 2 (books[1:3]):    max tier2_limit per item per set, wanted prizes only
-      - Overflow (books[3:]):   everything else (unwanted prizes + excess beyond tiers)
+      - Tier 2 (books[1]):      max tier2_limit per item per set, wanted prizes only
+      - Overflow (books[2]):    everything else (unwanted prizes + excess beyond tiers)
 
     Returns dict with keys: moves, to_overflow, summary.
     """
@@ -120,8 +120,8 @@ def analyze_and_plan(inventories, book_serials, config, tier1_limit=4, tier2_lim
 
     # ── Destination books by tier ──
     tier1_book = book_serials[0] if len(book_serials) >= 1 else None
-    tier2_books = book_serials[1:3] if len(book_serials) >= 2 else []
-    overflow_books = book_serials[3:] if len(book_serials) >= 4 else []
+    tier2_books = book_serials[1:2] if len(book_serials) >= 2 else []
+    overflow_books = book_serials[2:] if len(book_serials) >= 3 else []
 
     summary = []
     moves = []          # (bod, from_book, to_book)
@@ -288,18 +288,18 @@ def _get_batch_size():
 
 
 def _get_overflow_dest(config, cycle_type):
-    """Returns the first overflow book serial (index 3+)."""
+    """Returns the overflow book serial (index 2)."""
     key = "conserva_books_tailor" if cycle_type == "Tailor" else "conserva_books_smith"
     full_list = config.get(key, [])
-    for i, s in enumerate(full_list):
-        if i >= 3 and s != 0:
-            return s
+    if len(full_list) >= 3 and full_list[2] != 0:
+        return full_list[2]
     return 0
 
 
 def _ensure_bridge():
-    """Connects to the DLL packet bridge and probes for the game socket handle.
-    The DLL has no auto-capture — Python must find and set the handle each session.
+    """Connects to the DLL packet bridge and sets the game socket handle.
+    Reuses cached handle from previous successful probe; only force-probes
+    on first call or after a failed injection.
     """
     try:
         import BodCycler_PacketBridge as pb
@@ -307,10 +307,9 @@ def _ensure_bridge():
             if not pb.connect():
                 AddToSystemJournal("PacketBridge: Cannot connect. Is DLL injected? (python inject_dll.py)")
                 return False
-        # Always re-probe: never trust a stale captured handle from a previous run.
         st = pb.status()
         AddToSystemJournal(f"PacketBridge pre-probe status: captured={st.get('captured')} socket={st.get('socket')}")
-        h = pb.set_socket_by_probe()
+        h = pb.set_socket_by_probe()  # reuses cached handle if available
         if not h:
             AddToSystemJournal("PacketBridge: Socket probe failed. Is Stealth connected to the server?")
             return False
@@ -354,6 +353,8 @@ def _dll_extract_batch(book_serial, positions):
         serial = 0
         timeout = time.time() + 3
         while time.time() < timeout:
+            if check_abort():
+                break
             for i in range(GetGumpsCount()):
                 if GetGumpID(i) == BOOK_GUMP_ID:
                     serial = GetGumpInfo(i)["Serial"]
@@ -367,9 +368,7 @@ def _dll_extract_batch(book_serial, positions):
             break
 
         btn = 5 + (pos * 2)
-        #AddToSystemJournal(f"  Drop: pos={pos} btn={btn} serial={hex(serial)} gump={hex(BOOK_GUMP_ID)}")
         result = pb.send_gump_response(serial, BOOK_GUMP_ID, btn)
-        #AddToSystemJournal(f"  inject_raw result={result}")
         if result > 0:
             dropped += 1
             Wait(300)  # let server process the drop before next inject
@@ -401,6 +400,50 @@ def _route_bods_to_book(bod_serials, dest_book):
     return routed
 
 
+def _get_book_bod_count(book_serial):
+    """Reads the tooltip to get current BOD count. Returns 0 if unreadable."""
+    tip = GetTooltip(book_serial).lower()
+    m = re.search(r'deeds in book[:\s]+(\d+)', tip, re.IGNORECASE)
+    return int(m.group(1)) if m else 0
+
+
+def move_all_bods(config, source_book, dest_book):
+    """Extracts all BODs from source_book via DLL and routes them to dest_book."""
+    if not _ensure_bridge():
+        return
+
+    total = _get_book_bod_count(source_book)
+    if total == 0:
+        AddToSystemJournal(f"Move BODs: Source book {hex(source_book)} is empty.")
+        return
+
+    AddToSystemJournal(f"Move BODs: {total} BODs from {hex(source_book)} -> {hex(dest_book)}")
+    moved = 0
+
+    while True:
+        if check_abort():
+            break
+
+        remaining = _get_book_bod_count(source_book)
+        if remaining == 0:
+            break
+
+        batch_size = min(_get_batch_size(), remaining)
+        if batch_size <= 0:
+            AddToSystemJournal("  Backpack full.")
+            break
+
+        extracted = _dll_extract_batch(source_book, [0] * batch_size)
+        if not extracted:
+            AddToSystemJournal("  Extraction failed.")
+            break
+
+        routed = _route_bods_to_book(extracted, dest_book)
+        moved += routed
+
+    AddToSystemJournal(f"Move BODs complete: {moved}/{total} moved.")
+
+
 def execute_trim(config, cycle_type, mode="all"):
     """Full DLL-based trim: loops analyze → extract one book → rescan → repeat until stable.
     Converges in 1 pass because each iteration uses fresh JSONs.
@@ -419,16 +462,17 @@ def execute_trim(config, cycle_type, mode="all"):
 
     # Tier membership from CONFIG slot positions (not filtered array indices)
     config_key = "conserva_books_tailor" if cycle_type == "Tailor" else "conserva_books_smith"
-    config_list = config.get(config_key, [0]*5)
+    config_list = config.get(config_key, [0]*3)
     tier1_book = config_list[0] if len(config_list) > 0 and config_list[0] != 0 else None
-    tier2_books = [s for i, s in enumerate(config_list) if 1 <= i <= 2 and s != 0]
-    overflow_config_books = set(s for i, s in enumerate(config_list) if i >= 3 and s != 0)
+    tier2_books = [s for i, s in enumerate(config_list) if i == 1 and s != 0]
+    overflow_config_books = set(s for i, s in enumerate(config_list) if i >= 2 and s != 0)
     tier_books_set = set()
     if tier1_book: tier_books_set.add(tier1_book)
     for tb in tier2_books: tier_books_set.add(tb)
 
     total_moved = 0
     iteration = 0
+    all_affected_books = set()
     MAX_ITERATIONS = 20  # safety limit
 
     while iteration < MAX_ITERATIONS:
@@ -455,7 +499,7 @@ def execute_trim(config, cycle_type, mode="all"):
         skipped_full = 0
 
         if mode == "pull_prizes":
-            # Only move wanted prizes FROM overflow config slots (3+) INTO tier slots (0-2)
+            # Only move wanted prizes FROM overflow slot (2) INTO tier slots (0-1)
             # Never move anything OUT of tier slots
             for bod, from_book, to_book in plan.get("moves", []):
                 if (from_book != to_book
@@ -499,14 +543,13 @@ def execute_trim(config, cycle_type, mode="all"):
         # Process ALL source books in this iteration to avoid thrashing
         # (processing one at a time causes the plan to reverse moves each iteration)
         moved_this_round = 0
-        affected_books = set()
 
         for source_book, actions in actions_by_source.items():
             if check_abort():
                 break
 
             actions.sort(key=lambda a: a[0], reverse=True)
-            affected_books.add(source_book)
+            all_affected_books.add(source_book)
 
             action_idx = 0
             while action_idx < len(actions):
@@ -532,7 +575,7 @@ def execute_trim(config, cycle_type, mode="all"):
                 dest_counts = defaultdict(int)
                 for _, dest in batch[:len(extracted)]:
                     dest_counts[dest] += 1
-                    affected_books.add(dest)
+                    all_affected_books.add(dest)
 
                 remaining_bods = list(extracted)
                 for dest, count in dest_counts.items():
@@ -550,7 +593,7 @@ def execute_trim(config, cycle_type, mode="all"):
 
         # Rescan affected books so next iteration has fresh positions
         if moved_this_round > 0 and not check_abort():
-            for serial in affected_books:
+            for serial in all_affected_books:
                 if check_abort():
                     break
                 map_and_save_book_inventory(serial)
@@ -814,7 +857,7 @@ def check_completable_sets(config, cycle_type, overflow_only=False):
         # Overflow = indices 3+ in the config list
         key = "conserva_books_tailor" if cycle_type == "Tailor" else "conserva_books_smith"
         full_list = config.get(key, [])
-        book_serials = [s for i, s in enumerate(full_list) if i >= 3 and s != 0]
+        book_serials = [s for i, s in enumerate(full_list) if i >= 2 and s != 0]
     if not book_serials:
         AddToSystemJournal(f"Conserva Manager: No {cycle_type} books configured.")
         return 0
@@ -866,7 +909,7 @@ def extract_and_combine_next_set(config, cycle_type, overflow_only=False):
     if overflow_only:
         key = "conserva_books_tailor" if cycle_type == "Tailor" else "conserva_books_smith"
         full_list = config.get(key, [])
-        book_serials = [s for i, s in enumerate(full_list) if i >= 3 and s != 0]
+        book_serials = [s for i, s in enumerate(full_list) if i >= 2 and s != 0]
     inventories = load_all_inventories(book_serials)
 
     # Find first completable set
@@ -898,11 +941,9 @@ def extract_and_combine_next_set(config, cycle_type, overflow_only=False):
     )
     AddToSystemJournal(f"  From {hex(target_book)}: 1 Large + {len(smalls)} Smalls")
 
-    # Collect positions, sort descending
+    # Extract specific set BODs by position (descending so indices don't shift)
     all_set_bods = [large] + smalls
     positions = sorted([b['pos'] for b in all_set_bods], reverse=True)
-
-    # Extract via DLL
     extracted = _dll_extract_batch(target_book, positions)
     if not extracted:
         AddToSystemJournal("  Extraction failed.")
@@ -973,12 +1014,11 @@ def extract_and_combine_next_set(config, cycle_type, overflow_only=False):
 # Fast Drop via DLL Injection (bypasses page flipping)
 # ---------------------------------------------------------------------------
 
-def fast_drop_bods(book_serial, positions, pause_ms=200):
+def fast_drop_bods(book_serial, positions, pause_ms=300):
     """Drops BODs from a book using raw 0xB1 packets via the injected DLL.
-    Book must be open (UseObject already called). Positions must be descending.
+    Book must be open (UseObject already called). Reads gump serial once
+    (stable on this shard) and loops btn=5 with a fixed pause between drops.
     Returns number of successful drops.
-
-    Falls back to RE template approach if DLL is not available.
     """
     try:
         import BodCycler_PacketBridge as pb
@@ -995,45 +1035,25 @@ def fast_drop_bods(book_serial, positions, pause_ms=200):
         AddToSystemJournal("PacketBridge: Module not found. DLL injection not available.")
         return 0
 
-    # Book should already be open — get current gump serial
-    idx = -1
+    # Read gump serial once — stable across drops on this shard
+    gump_serial = 0
     for i in range(GetGumpsCount()):
         if GetGumpID(i) == BOOK_GUMP_ID:
-            idx = i
+            gump_serial = GetGumpInfo(i).get("Serial", 0)
             break
-    if idx == -1:
+    if not gump_serial:
         AddToSystemJournal("FastDrop: No book gump open.")
         return 0
 
     dropped = 0
-    last_serial = 0
     for pos in positions:
         if check_abort():
             break
-
-        # Wait for gump serial to change (server sends new gump after each drop)
-        serial = 0
-        timeout = time.time() + 2
-        while time.time() < timeout:
-            for i in range(GetGumpsCount()):
-                if GetGumpID(i) == BOOK_GUMP_ID:
-                    s = GetGumpInfo(i)["Serial"]
-                    if s != last_serial:
-                        serial = s
-                        break
-            if serial:
-                break
-            Wait(50)
-
-        if not serial:
-            AddToSystemJournal(f"FastDrop: Lost gump after {dropped} drops.")
-            break
-
         btn = 5 + (pos * 2)
-        result = pb.send_gump_response(serial, BOOK_GUMP_ID, btn)
+        result = pb.send_gump_response(gump_serial, BOOK_GUMP_ID, btn)
         if result > 0:
             dropped += 1
-            last_serial = serial
+            Wait(pause_ms)
         else:
             AddToSystemJournal(f"FastDrop: inject failed at pos {pos} (result={result})")
             break

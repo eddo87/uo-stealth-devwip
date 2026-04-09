@@ -79,8 +79,8 @@ DEFAULT_CONFIG = {
         "MaterialCrate": 0, "TrashBarrel": 0, "ClothDyeTub": 0, "RewardCrate": 0,
         "BodBookCrate": 0, "ConservaCrate": 0, "ProspectorCrate": 0, "PowderCrate": 0
     },
-    "conserva_books_tailor": [0, 0, 0, 0, 0],
-    "conserva_books_smith":  [0, 0, 0, 0, 0],
+    "conserva_books_tailor": [0, 0, 0],
+    "conserva_books_smith":  [0, 0, 0],
     "conserva_manager": {"keep_tier1": 4, "keep_tier2": 6},
     "travel": {
         "RuneBook": 0, "Method": "Recall",
@@ -141,8 +141,10 @@ class BodCyclerGUI(threading.Thread):
         if "bots" not in self.config: self.config["bots"] = {"crafter_profile": "ed4", "collector_profiles": ["ed2", "ed3", "ed5"]}
         if "crafter_profile" not in self.config["bots"]: self.config["bots"]["crafter_profile"] = "ed4"
         if "collector_profiles" not in self.config["bots"]: self.config["bots"]["collector_profiles"] = ["ed2", "ed3", "ed5"]
-        if "conserva_books_tailor" not in self.config: self.config["conserva_books_tailor"] = [0, 0, 0, 0, 0]
-        if "conserva_books_smith" not in self.config: self.config["conserva_books_smith"] = [0, 0, 0, 0, 0]
+        if "conserva_books_tailor" not in self.config: self.config["conserva_books_tailor"] = [0, 0, 0]
+        elif len(self.config["conserva_books_tailor"]) > 3: self.config["conserva_books_tailor"] = self.config["conserva_books_tailor"][:3]
+        if "conserva_books_smith" not in self.config: self.config["conserva_books_smith"] = [0, 0, 0]
+        elif len(self.config["conserva_books_smith"]) > 3: self.config["conserva_books_smith"] = self.config["conserva_books_smith"][:3]
         if "conserva_manager" not in self.config: self.config["conserva_manager"] = {"keep_tier1": 4, "keep_tier2": 6}
         if self.config.get("conserva_manager", {}).get("keep_tier1") in (8, 10): self.config["conserva_manager"]["keep_tier1"] = 4
         if self.config.get("conserva_manager", {}).get("keep_tier2") == 20: self.config["conserva_manager"]["keep_tier2"] = 6
@@ -317,6 +319,50 @@ class BodCyclerGUI(threading.Thread):
                     cm.analyze_and_log(self.config, "Smith")
             except Exception as e:
                 AddToSystemJournal(f"Conserva Analyze error: {e}")
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _target_move_book(self, which):
+        label = "Source" if which == "src" else "Destination"
+        ClientPrintEx(Self(), 1, 1, f"Target the {label} book...")
+        ClientRequestObjectTarget()
+        start = time.time()
+        while not ClientTargetResponsePresent():
+            time.sleep(0.1)
+            if time.time() - start > 15:
+                return
+        response = ClientTargetResponse()
+        serial = response["ID"]
+        if serial and serial > 0:
+            name = hex(serial)
+            tip = GetTooltip(serial).lower()
+            if "book name:" in tip:
+                book_name = tip.split("book name:")[-1].strip().split("|")[0].strip()
+                name = f"{book_name} ({hex(serial)})"
+            if which == "src":
+                self._move_src = serial
+                self._move_src_lbl.config(text=f"From: {name}", fg="navy")
+            else:
+                self._move_dst = serial
+                self._move_dst_lbl.config(text=f"To: {name}", fg="navy")
+
+    def trigger_move_bods(self):
+        src = self._move_src
+        dst = self._move_dst
+        if not src or not dst:
+            AddToSystemJournal("Move BODs: Set both Source and Destination books first.")
+            return
+        if src == dst:
+            AddToSystemJournal("Move BODs: Source and Destination are the same book.")
+            return
+        self.set_global_status("Moving BODs...")
+        def _run():
+            try:
+                import importlib, BodCycler_ConservaManager as cm; importlib.reload(cm)
+                cm.move_all_bods(self.config, src, dst)
+                self.set_global_status("Idle")
+            except Exception as e:
+                AddToSystemJournal(f"Move BODs error: {e}")
+                self.set_global_status("Idle")
         threading.Thread(target=_run, daemon=True).start()
 
     def _clear_conserva_book(self, list_key, idx, label_widget, tier):
@@ -741,9 +787,40 @@ class BodCyclerGUI(threading.Thread):
         ClientPrintEx(Self(), 1, 1, "Cycle Stopped")
         AddToSystemJournal("User requested cycle stop. Safely aborting scripts...")
 
+    def _auto_inject_dll(self):
+        """Injects the packet DLL into Stealth if not already loaded.
+        Runs once at startup in a background thread — skips if bridge already connects."""
+        try:
+            import BodCycler_PacketBridge as pb
+            if pb.connect():
+                return  # already loaded
+        except Exception:
+            pass
+        try:
+            import inject_dll
+            pid = inject_dll.find_stealth_pid()
+            if not pid:
+                return
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            dll_candidates = [
+                os.path.join(script_dir, "uo_packet_injector.dll"),
+                os.path.join(script_dir, "uo_packet_injector", "target", "release", "uo_packet_injector.dll"),
+            ]
+            dll_path = next((p for p in dll_candidates if os.path.exists(p)), None)
+            if not dll_path:
+                return
+            ok = inject_dll.inject(pid, dll_path)
+            if ok:
+                AddToSystemJournal("PacketBridge: DLL injected.")
+            else:
+                AddToSystemJournal("PacketBridge: Injection failed.")
+        except Exception as e:
+            AddToSystemJournal(f"PacketBridge: Auto-inject error: {e}")
+
     def run(self):
         from tkinter import ttk
         self.load_config()
+        threading.Thread(target=self._auto_inject_dll, daemon=True).start()
         self.root = Tk()
         self.root.title(f"{CharName()} — BOD Cycler")
 
@@ -1084,10 +1161,10 @@ class BodCyclerGUI(threading.Thread):
             Checkbutton(f_hdr, text=f"Trim {section_label}", variable=self.vars[trim_var_key],
                         bg=BG, font=("Tahoma", 8, "bold")).pack(side=LEFT)
 
-            book_list = self.config.get(list_key, [0]*5)
-            for i in range(5):
+            book_list = self.config.get(list_key, [0]*3)
+            for i in range(3):
                 s = book_list[i] if i < len(book_list) else 0
-                tier = "Best" if i == 0 else ("Tier 2" if i <= 2 else "Overflow")
+                tier = "Best" if i == 0 else ("Tier 2" if i == 1 else "Overflow")
                 t_text = f"{i+1}. {tier}: {hex(s)}" if s else f"{i+1}. {tier}: Not Set"
                 fg_c = "navy" if s else "#888"
                 f_row = Frame(t6, bg=BG)
@@ -1100,6 +1177,22 @@ class BodCyclerGUI(threading.Thread):
                 _btn(f_row, "X",
                      lambda idx=i, c=list_key, l=lw, t=tier: self._clear_conserva_book(c, idx, l, t),
                      width=2, bg="#FFAAAA").pack(side=LEFT, padx=1)
+
+        # ── Move BODs between books ────────────────────────────────────
+        Label(t6, text="── Move BODs ──", bg=BG,
+              font=("Tahoma", 8, "bold"), fg="#555").pack(fill="x", pady=(8, 2))
+        f_move = Frame(t6, bg=BG)
+        f_move.pack(fill="x", pady=2)
+        self._move_src = 0
+        self._move_dst = 0
+        self._move_src_lbl = _lbl(f_move, "From: Not Set", fg="#888", width=18, anchor="w")
+        self._move_src_lbl.pack(side=LEFT)
+        _btn(f_move, "Target", lambda: self._target_move_book("src"), width=6).pack(side=LEFT, padx=2)
+        Label(f_move, text=" \u2192 ", bg=BG, font=("Tahoma", 9, "bold")).pack(side=LEFT)
+        self._move_dst_lbl = _lbl(f_move, "To: Not Set", fg="#888", width=18, anchor="w")
+        self._move_dst_lbl.pack(side=LEFT)
+        _btn(f_move, "Target", lambda: self._target_move_book("dst"), width=6).pack(side=LEFT, padx=2)
+        _btn(f_move, "Move All", self.trigger_move_bods, "#FFA07A", width=8).pack(side=LEFT, padx=4)
 
         # ── Bottom controls ────────────────────────────────────────────
         f_ctl = Frame(self.root, bg=BG, pady=6)

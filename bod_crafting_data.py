@@ -107,8 +107,9 @@ SMITH_ITEMS = {
     # ── Axes (cat=36) ─────────────────────────────────────────────────────────
     "axe":                  (36, 2,  0x0F49, 6,  "iron"),
     "battle axe":           (36, 9,  0x0F47, 13, "iron"),
-    "double axe":           (36, 16, 0x0F4B, 12, "iron"),   # pos 3
+    "double axe":           (36, 16, 0x0F4B, 12, "iron"),   # pos 3 
     "executioner's axe":    (36, 23, 0x0F45, 13, "iron"),
+    "large battle axe":     (36, 30, 0x13FB, 12, "iron"),
     "two handed axe":       (36, 37, 0x1443, 13, "iron"),
     "war axe":              (36, 44, 0x13B0, 10, "iron"),
     # ── Bladed weapons (cat=29) ───────────────────────────────────────────────
@@ -129,12 +130,12 @@ SMITH_ITEMS = {
     "war mace":             (50, 30, 0x1407, 10, "iron"),   # pos 5
     "war hammer":           (50, 37, 0x1439, 16, "iron"),
     # ── Polearms (cat=43) ─────────────────────────────────────────────────────
+    "bardiche":             (43, 2,  0x0F4D, 18,  "iron"),
     "halberd":              (43, 16, 0x143F, 14, "iron"),   # pos 3
     "short spear":          (43, 37, 0x1403, 6, "iron"),    # pos 6
     "spear":                (43, 51, 0x0F62, 6,  "iron"),   # pos 8
     "war fork":             (43, 58, 0x1405, 12, "iron"),   # pos 9
     # ── Routing-only (btn=0 → not crafted; large BODs routed to Scartare) ────
-    "bardiche":             (0,  0,  0x0F4D, 0,  "iron"),
     "boomerang":            (0,  0,  0x27A2, 0,  "iron"),
 }
 

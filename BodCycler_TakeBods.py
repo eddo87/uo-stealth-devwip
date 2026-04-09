@@ -139,11 +139,9 @@ def run_take_bods_cycle():
         _get_bod(NPCB)
 
         _store_bods()
-        hx = config.get("home", {}).get("X", 0)
-        hy = config.get("home", {}).get("Y", 0)
-        if hx and hy:
-            newMoveXY(hx, hy, False, 1, True)  # Safe spot from config["home"]
-
+        Wait(MIN_PAUSE)
+        newMoveXY(988, 523, False, 1, True)  # Safe spot for disconnect
+        Wait(MED_PAUSE)
         AddToSystemJournal(f"{profile}: Done. Disconnecting...")
         Wait(MED_PAUSE)
         Disconnect()

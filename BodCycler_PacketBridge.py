@@ -12,6 +12,7 @@ BRIDGE_HOST = "127.0.0.1"
 BRIDGE_PORT = 48821
 
 _sock = None
+_cached_handle = 0  # Last known good game socket handle
 
 
 def connect():
@@ -28,20 +29,36 @@ def connect():
         return False
 
 
-def set_socket_by_probe():
+def set_socket_by_probe(force=False):
     """Finds the game socket by brute-force: tries handles 4-10000 step 4,
     sends a 0x73 ping via the DLL, first successful send = game socket.
     Returns the winning handle or 0.
+
+    If a cached handle exists and force=False, reuses it (skips probe).
     """
+    global _cached_handle
+    if _cached_handle and not force:
+        if set_socket(_cached_handle):
+            return _cached_handle
+        # Cached handle no longer valid — fall through to full probe
+        _cached_handle = 0
+
     ping = b"\x73" + b"\x00" * 36  # harmless UO ping packet
     for h in range(4, 10000, 4):
         if set_socket(h):
             result = inject_raw(ping)
             if result is not None and result > 0:
                 AddToSystemJournal(f"PacketBridge: Game socket found at handle {h}")
+                _cached_handle = h
                 return h
     AddToSystemJournal("PacketBridge: Socket probe exhausted — handle not found.")
     return 0
+
+
+def clear_cached_handle():
+    """Clears the cached handle, forcing next probe to do a full scan."""
+    global _cached_handle
+    _cached_handle = 0
 
 
 def disconnect():

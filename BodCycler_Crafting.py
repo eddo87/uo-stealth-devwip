@@ -289,7 +289,7 @@ def parse_bod(bod_serial, cycle_type="Tailor"):
     tooltip = tooltip.lower()
     lines = [line.strip() for line in tooltip.split('|') if line.strip()]
 
-    is_large = "large" in tooltip
+    is_large = "large bulk order" in tooltip
     is_except = "exceptional" in tooltip
 
     qty_total = 0
