@@ -109,8 +109,9 @@ class BodCyclerGUI(threading.Thread):
         super(BodCyclerGUI, self).__init__(daemon=True)
         self.config = copy.deepcopy(DEFAULT_CONFIG)
         self.root = None
-        self.vars = {} 
+        self.vars = {}
         self.running = True
+        self._targeted_serials = set()  # (category, key) pairs set by get_target since last save
         self.last_supply_mtime = 0
         self.last_stats_mtime = 0
 
@@ -152,6 +153,16 @@ class BodCyclerGUI(threading.Thread):
             self.config["discord_notify_prizes"] = {"tailor": [23, 24], "smith": [12, 17, 19, 20, 21, 22]}
 
     def save_config(self):
+        # Refresh worker-persisted book serials from disk (e.g. Origine/Scartare swapped
+        # mid-cycle) without clobbering serials the user has just targeted in this session.
+        disk = load_config() or {}
+        for cat in ("books", "books_tailor", "books_smith"):
+            if cat not in disk or not isinstance(disk[cat], dict):
+                continue
+            for k, v in disk[cat].items():
+                if (cat, str(k)) not in self._targeted_serials:
+                    self.config.setdefault(cat, {})[k] = v
+        self._targeted_serials.clear()
         for name, var in self.vars.items():
             if name.startswith("rune_"):
                 key = name.replace("rune_", "")
@@ -208,6 +219,7 @@ class BodCyclerGUI(threading.Thread):
             elif category in ("conserva_books_tailor", "conserva_books_smith"):
                 idx = int(key)
                 self.config[category][idx] = serial
+            self._targeted_serials.add((category, str(key)))
             
             if label_widget:
                 label_widget.config(text=f"{key}: {hex(serial)}", fg="blue")
@@ -234,7 +246,14 @@ class BodCyclerGUI(threading.Thread):
         self.save_config()
         self.set_global_status("Running (Crafting)", force=True)
         ClientPrintEx(Self(), 1, 1, "Starting Crafting Engine...")
-        threading.Thread(target=BodCycler_Crafting.run_crafting_cycle, daemon=True).start()
+        def _run():
+            try:
+                BodCycler_Crafting.run_crafting_cycle()
+            except Exception as e:
+                AddToSystemJournal(f"Crafting error: {e}")
+            finally:
+                self.set_global_status("Idle")
+        threading.Thread(target=_run, daemon=True).start()
 
     def trigger_trade(self):
         self.save_config()
@@ -358,11 +377,11 @@ class BodCyclerGUI(threading.Thread):
         def _run():
             try:
                 import importlib, BodCycler_ConservaManager as cm; importlib.reload(cm)
-                cm.move_all_bods(self.config, src, dst)
-                self.set_global_status("Idle")
+                status = cm.move_all_bods(self.config, src, dst)
+                self.set_global_status(status or "Idle")
             except Exception as e:
                 AddToSystemJournal(f"Move BODs error: {e}")
-                self.set_global_status("Idle")
+                self.set_global_status(f"Move BODs error: {e}")
         threading.Thread(target=_run, daemon=True).start()
 
     def _clear_conserva_book(self, list_key, idx, label_widget, tier):

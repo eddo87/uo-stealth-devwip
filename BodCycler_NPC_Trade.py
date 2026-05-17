@@ -172,8 +172,19 @@ def sort_new_bods(config):
                 dest_name = "Scartare"
         else:
             if info.get('qty_needed', 1) == 0:
-                # Already filled — route to Consegna to be traded
-                if consegna_serial != 0:
+                # Already filled small — prize-enabled goes to Conserva, otherwise Consegna
+                if is_prize_enabled(info.get('prize_id'), config) and conserva_serial != 0:
+                    dest_book = conserva_serial
+                    dest_name = "Conserva"
+                    parsed_bod = {
+                        "type": "Small",
+                        "item": info['item_name'].lower(),
+                        "quality": "Exceptional" if info.get('is_except') else "Normal",
+                        "material": info.get('material', 'Iron'),
+                        "amount": info.get('qty_total', 20),
+                        "category": info.get('cat', 'Small Bods'),
+                    }
+                elif consegna_serial != 0:
                     dest_book = consegna_serial
                     dest_name = "Consegna"
             elif origine_serial != 0:

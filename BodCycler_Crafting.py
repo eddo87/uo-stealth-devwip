@@ -168,17 +168,21 @@ def _swap_full_book(bbcrate, book_serial, cycle_type, config=None, config_key=No
             AddToSystemJournal(f"  Found empty book {hex(book)}. Swapping.")
             MoveItem(book, 1, Backpack(), 0, 0, 0)
             Wait(600)
-            # Persist to config
+            # Persist to config (both books.<key> and books_<mode>.<key>)
             if config and config_key:
                 config["books"][config_key] = book
                 try:
                     import json as _json
                     with open(CONFIG_FILE, "r") as f:
                         disk_config = _json.load(f)
-                    disk_config["books"][config_key] = book
-                    with open(CONFIG_FILE, "w") as f:
+                    disk_config.setdefault("books", {})[config_key] = book
+                    mode_key = "books_smith" if cycle_type == "Smith" else "books_tailor"
+                    disk_config.setdefault(mode_key, {})[config_key] = book
+                    tmp = CONFIG_FILE + ".tmp"
+                    with open(tmp, "w") as f:
                         _json.dump(disk_config, f, indent=4)
-                    AddToSystemJournal(f"  Config updated: books.{config_key} = {hex(book)}")
+                    os.replace(tmp, CONFIG_FILE)
+                    AddToSystemJournal(f"  Config updated: {mode_key}.{config_key} = {hex(book)}")
                 except Exception as e:
                     AddToSystemJournal(f"  WARNING: Could not persist config — {e}")
             return book
@@ -379,21 +383,37 @@ def parse_bod(bod_serial, cycle_type="Tailor"):
     }
 
 
-def is_item_exceptional(item_serial):
-    """Checks if item is exceptional. Waits for the server tooltip to arrive before checking."""
-    tt = GetTooltip(item_serial)
-    if not tt:
-        Wait(250)
+def is_item_exceptional(item_serial, item_name):
+    """Checks if a freshly crafted item is exceptional.
+
+    Retries until the tooltip is non-empty and matches item_name,
+    then returns whether it contains 'exceptional'.
+    Returns False if the tooltip never resolves (safe default).
+    """
+    MAX_RETRIES = 5
+    RETRY_DELAY_MS = 175
+
+    for attempt in range(MAX_RETRIES):
+        if attempt > 0:
+            Wait(RETRY_DELAY_MS)
+
         tt = GetTooltip(item_serial)
-    if not tt:
-        AddToSystemJournal(f"[DEBUG] is_item_exceptional: tooltip still empty for {hex(item_serial)}")
-        return False
-    return "exceptional" in tt.lower()
+
+        if not tt or item_name.lower() not in tt.lower():
+            continue  # empty or stale — retry
+
+        return "exceptional" in tt.lower()  # confident result
+
+    AddToSystemJournal(
+        f"[WARN] Tooltip never resolved for '{item_name}' "
+        f"(serial={hex(item_serial)}) after {MAX_RETRIES} attempts — assuming not exceptional."
+    )
+    return False
     
 
 
 
-def count_valid_backpack_items(item_id, is_except):
+def count_valid_backpack_items(item_id, is_except, item_name):
     """Counts valid items currently in backpack."""
     FindType(item_id, Backpack())
     found = GetFoundList()
@@ -401,7 +421,7 @@ def count_valid_backpack_items(item_id, is_except):
     for item in found:
         if not is_except:
             count += 1
-        elif is_item_exceptional(item):
+        elif is_item_exceptional(item, item_name):
             count += 1
     return count
 
@@ -576,7 +596,7 @@ def _recycle_single(item_serial, tool_type):
             close_all_gumps()
 
 
-def recycle_invalid_items(item_id, is_except, tool_type):
+def recycle_invalid_items(item_id, is_except, tool_type, item_name):
     """Safety-net sweep — recycles any non-exceptional items still in backpack."""
     # Tailor Normal BODs: don't scissors valid normal items.
     # Smith: always smelt non-exceptionals to recoup ingots, regardless of BOD quality.
@@ -589,14 +609,14 @@ def recycle_invalid_items(item_id, is_except, tool_type):
     for it in items:
         if check_abort():
             break
-        if not is_item_exceptional(it):
+        if not is_item_exceptional(it, item_name):
             _recycle_single(it, tool_type)
 
 
 def craft_items_until_done(bod_serial, tool_type, cat_identifier, item_identifier, item_name, item_id, qty_needed, is_except, mat_btn):
     """Crafts items utilizing either exact Button IDs or intelligent text fallback."""
-    current_target_id = item_id 
-    made_valid = count_valid_backpack_items(current_target_id, is_except)
+    current_target_id = item_id
+    made_valid = count_valid_backpack_items(current_target_id, is_except, item_name)
     attempts = 0
     make_last_ready = False
     AddToSystemJournal(f"Crafing {item_name}")
@@ -700,12 +720,12 @@ def craft_items_until_done(bod_serial, tool_type, cat_identifier, item_identifie
                 make_last_ready = True
 
             # Smelt/scissors immediately — don't let non-exceptionals accumulate weight.
-            if (is_except or tool_type == 0x0FBC) and not is_item_exceptional(new_serial):
+            if (is_except or tool_type == 0x0FBC) and not is_item_exceptional(new_serial, item_name):
                 AddToSystemJournal("[Recycle] Not exceptional — recycling immediately.")
                 _recycle_single(new_serial, tool_type)
 
-        recycle_invalid_items(current_target_id, is_except, tool_type)
-        made_valid = count_valid_backpack_items(current_target_id, is_except)
+        recycle_invalid_items(current_target_id, is_except, tool_type, item_name)
+        made_valid = count_valid_backpack_items(current_target_id, is_except, item_name)
         #AddToSystemJournal(f"Crafting check: {made_valid}/{qty_needed} in bag.")
         
     return made_valid >= qty_needed
@@ -741,9 +761,9 @@ def fill_bod_completely(bod_serial, item_id, qty_to_fill, item_name, is_except):
     for item in all_items:
         if not is_except:
             valid_items.append(item)
-        elif is_item_exceptional(item):
+        elif is_item_exceptional(item, item_name):
             valid_items.append(item)
-                
+
     if not valid_items:
         AddToSystemJournal("No valid crafted items found.")
         return False
@@ -924,7 +944,7 @@ def run_crafting_cycle():
             close_all_gumps()
             continue
             
-        in_bag = count_valid_backpack_items(item_id, info['is_except'])
+        in_bag = count_valid_backpack_items(item_id, info['is_except'], info['item_name'])
         to_make = info['qty_needed'] - in_bag
         
         if to_make > 0:

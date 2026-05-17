@@ -328,6 +328,14 @@ def _dll_extract_batch(book_serial, positions):
     """
     import BodCycler_PacketBridge as pb
 
+    # Book must be directly in backpack for UseObject to open the gump reliably.
+    # If it's in a crate or closed container, move it first.
+    FindType(BOD_BOOK_TYPE, Backpack())
+    if book_serial not in set(GetFoundList()):
+        AddToSystemJournal(f"  Moving {hex(book_serial)} to backpack for extraction...")
+        MoveItem(book_serial, 1, Backpack(), 0, 0, 0)
+        Wait(1200)
+
     close_all_gumps()
     UseObject(book_serial)
     Wait(2000)
@@ -387,6 +395,54 @@ def _dll_extract_batch(book_serial, positions):
     return new_bods
 
 
+def _numgump_extract_batch(book_serial, max_drops):
+    """Fallback extractor using NumGumpButton(idx, 5) per drop.
+    Slower than the DLL path (one gump-open per BOD) but works without the injector.
+    Mirrors the proven pattern from BodCycler_Crafting.extract_bod_from_origine.
+    """
+    # Ensure book is in backpack before any UseObject call.
+    FindType(BOD_BOOK_TYPE, Backpack())
+    if book_serial not in set(GetFoundList()):
+        AddToSystemJournal(f"  Moving {hex(book_serial)} to backpack for extraction...")
+        MoveItem(book_serial, 1, Backpack(), 0, 0, 0)
+        Wait(1200)
+
+    FindType(BOD_TYPE, Backpack())
+    bp_before = set(GetFoundList())
+
+    dropped = 0
+    for _ in range(max_drops):
+        if check_abort():
+            break
+
+        close_all_gumps()
+        UseObject(book_serial)
+
+        idx = -1
+        deadline = time.time() + 3
+        while time.time() < deadline:
+            for i in range(GetGumpsCount()):
+                if GetGumpID(i) == BOOK_GUMP_ID:
+                    idx = i
+                    break
+            if idx != -1:
+                break
+            Wait(100)
+        if idx == -1:
+            AddToSystemJournal(f"  Fallback: failed to open book {hex(book_serial)} after {dropped} drops.")
+            break
+
+        NumGumpButton(idx, 5)
+        Wait(1500)
+        dropped += 1
+
+    FindType(BOD_TYPE, Backpack())
+    bp_after = set(GetFoundList())
+    new_bods = list(bp_after - bp_before)
+    AddToSystemJournal(f"  Fallback extracted {len(new_bods)} BODs from {hex(book_serial)}")
+    return new_bods
+
+
 def _route_bods_to_book(bod_serials, dest_book):
     """Moves extracted BODs from backpack into a destination book."""
     routed = 0
@@ -408,20 +464,31 @@ def _get_book_bod_count(book_serial):
 
 
 def move_all_bods(config, source_book, dest_book):
-    """Extracts all BODs from source_book via DLL and routes them to dest_book."""
-    if not _ensure_bridge():
-        return
-
+    """Extracts all BODs from source_book and routes them to dest_book.
+    Uses DLL packet injection when available; falls back to NumGumpButton otherwise.
+    Returns a status string describing the outcome.
+    """
     total = _get_book_bod_count(source_book)
     if total == 0:
         AddToSystemJournal(f"Move BODs: Source book {hex(source_book)} is empty.")
-        return
+        return f"Move BODs: source empty ({hex(source_book)})"
 
-    AddToSystemJournal(f"Move BODs: {total} BODs from {hex(source_book)} -> {hex(dest_book)}")
+    # DLL preferred (batch ~60 per open); NumGumpButton fallback (1 per open).
+    if _ensure_bridge():
+        extract_fn = lambda book, batch: _dll_extract_batch(book, [0] * batch)
+        mode = "DLL"
+    else:
+        AddToSystemJournal("Move BODs: DLL bridge unavailable — using NumGumpButton fallback (slower).")
+        extract_fn = _numgump_extract_batch
+        mode = "NumGumpButton"
+
+    AddToSystemJournal(f"Move BODs [{mode}]: {total} BODs from {hex(source_book)} -> {hex(dest_book)}")
     moved = 0
+    aborted_reason = None
 
     while True:
         if check_abort():
+            aborted_reason = "aborted"
             break
 
         remaining = _get_book_bod_count(source_book)
@@ -431,17 +498,22 @@ def move_all_bods(config, source_book, dest_book):
         batch_size = min(_get_batch_size(), remaining)
         if batch_size <= 0:
             AddToSystemJournal("  Backpack full.")
+            aborted_reason = "backpack full"
             break
 
-        extracted = _dll_extract_batch(source_book, [0] * batch_size)
+        extracted = extract_fn(source_book, batch_size)
         if not extracted:
             AddToSystemJournal("  Extraction failed.")
+            aborted_reason = "extraction failed"
             break
 
         routed = _route_bods_to_book(extracted, dest_book)
         moved += routed
 
     AddToSystemJournal(f"Move BODs complete: {moved}/{total} moved.")
+    if aborted_reason:
+        return f"Move BODs [{mode}]: {moved}/{total} moved ({aborted_reason})"
+    return f"Move BODs [{mode}]: {moved}/{total} moved"
 
 
 def execute_trim(config, cycle_type, mode="all"):
@@ -894,16 +966,15 @@ def check_completable_sets(config, cycle_type, overflow_only=False):
 
 
 def extract_and_combine_next_set(config, cycle_type, overflow_only=False):
-    """Finds the first completable set, extracts via DLL, combines, routes to Consegna.
-    All in one step — no CTRL+K needed.
+    """Finds the first completable set, extracts BODs, combines, routes to Consegna.
+    Uses DLL packet injection when available; falls back to page-flip extraction otherwise.
 
     If overflow_only=True, only checks overflow books (index 3+).
     """
     from BodCycler_Assembler import combine_and_store
     import BodCycler_Crafting
 
-    if not _ensure_bridge():
-        return False
+    use_dll = _ensure_bridge()
 
     book_serials = _get_book_serials(config, cycle_type)
     if overflow_only:
@@ -944,12 +1015,26 @@ def extract_and_combine_next_set(config, cycle_type, overflow_only=False):
     # Extract specific set BODs by position (descending so indices don't shift)
     all_set_bods = [large] + smalls
     positions = sorted([b['pos'] for b in all_set_bods], reverse=True)
-    extracted = _dll_extract_batch(target_book, positions)
+
+    if use_dll:
+        extracted = _dll_extract_batch(target_book, positions)
+        mode_label = "DLL"
+    else:
+        AddToSystemJournal("  DLL unavailable — using page-flip extraction (slower).")
+        FindType(BOD_BOOK_TYPE, Backpack())
+        if target_book not in set(GetFoundList()):
+            AddToSystemJournal(f"  Moving {hex(target_book)} to backpack...")
+            MoveItem(target_book, 1, Backpack(), 0, 0, 0)
+            Wait(1200)
+        extracted_map = extract_bods(target_book, list(all_set_bods))
+        extracted = list(extracted_map.values())
+        mode_label = "page-flip"
+
     if not extracted:
         AddToSystemJournal("  Extraction failed.")
         return False
 
-    AddToSystemJournal(f"  Extracted {len(extracted)} BODs via DLL.")
+    AddToSystemJournal(f"  Extracted {len(extracted)} BODs via {mode_label}.")
 
     # Identify Large vs Smalls from extracted serials
     large_serial = None
