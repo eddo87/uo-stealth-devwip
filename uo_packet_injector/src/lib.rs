@@ -18,6 +18,7 @@ use std::thread;
 // ---------------------------------------------------------------------------
 extern "system" {
     fn send(socket: usize, buf: *const u8, len: i32, flags: i32) -> i32;
+    fn getpeername(socket: usize, name: *mut u8, namelen: *mut i32) -> i32;
 }
 
 // ---------------------------------------------------------------------------
@@ -119,6 +120,27 @@ fn handle_client(mut stream: TcpStream) {
                     SOCKET_CAPTURED.store(true, Ordering::SeqCst);
                     log(&format!("Socket set to: {}", sock));
                     stream.write_all(b"OK\n").ok();
+                } else {
+                    stream.write_all(b"ERR: need 9 bytes\n").ok();
+                }
+            }
+            0xFE => {
+                // Peer probe: takes 8-byte LE socket handle, returns getpeername() result
+                if pkt_len >= 9 {
+                    let mut arr = [0u8; 8];
+                    arr.copy_from_slice(&buf[1..9]);
+                    let probe_sock = u64::from_le_bytes(arr) as usize;
+                    let mut addr = [0u8; 16]; // sockaddr_in
+                    let mut addrlen: i32 = 16;
+                    let ret = unsafe { getpeername(probe_sock, addr.as_mut_ptr(), &mut addrlen) };
+                    if ret == 0 {
+                        let port = u16::from_be_bytes([addr[2], addr[3]]);
+                        let ip = format!("{}.{}.{}.{}", addr[4], addr[5], addr[6], addr[7]);
+                        let resp = format!("peer={}:{}\n", ip, port);
+                        stream.write_all(resp.as_bytes()).ok();
+                    } else {
+                        stream.write_all(b"peer=none\n").ok();
+                    }
                 } else {
                     stream.write_all(b"ERR: need 9 bytes\n").ok();
                 }

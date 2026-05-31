@@ -1,7 +1,9 @@
 from stealth import *
 import json
 import os
+import re
 import time
+import datetime
 from bod_data import LARGE_COMPONENTS
 
 from BodCycler_Utils import (
@@ -285,76 +287,206 @@ def extract_bods(book_serial, target_bods, inventory=None):
 
     return extracted_map
 
-def combine_and_store(large_serial, small_serials, config):
-    """Combines a single set locally in the backpack and routes to Consegna."""
-    if not large_serial: return False
+def _count_combined_smalls(large_serial):
+    """Reads the Large BOD tooltip and counts how many component lines show a non-zero count.
+    Returns (combined_count, total_components).
+    E.g. 'studded gorget: 1' means 1 combined; 'studded gorget: 0' means not yet combined.
+    """
+    ClickOnObject(large_serial)
+    Wait(400)
+    tooltip = GetTooltip(large_serial).lower()
+    lines = [l.strip() for l in tooltip.split('|') if l.strip()]
 
-    AddToSystemJournal("Filling Large BOD with exact items...")
-    
-    for small in small_serials:
-        if check_abort(): return False
-        combined_successfully = False
-        
-        for attempt in range(3):
-            world_save_guard()
-            
-            # Verification: If small bod doesn't exist, it was consumed successfully
-            FindType(BOD_TYPE, Backpack())
-            if small not in list(GetFoundList()):
-                combined_successfully = True
+    combined = 0
+    total = 0
+    for line in lines:
+        # Component lines look like "studded gorget: 0" or "studded gorget: 1"
+        m = re.search(r':\s*(\d+)\s*$', line)
+        if not m:
+            continue
+        # Skip non-component lines (amount to make, weight, etc.)
+        if any(kw in line for kw in ['amount to make', 'weight', 'deeds', 'blessed']):
+            continue
+        val = int(m.group(1))
+        total += 1
+        if val > 0:
+            combined += 1
+
+    return combined, total
+
+
+def _open_large_and_combine_target(large_serial):
+    """Opens a Large BOD gump, presses Combine, waits for target cursor.
+    Returns True if target appeared, False otherwise.
+    """
+    close_all_gumps()
+    UseObject(large_serial)
+
+    t_gump = time.time()
+    idx = -1
+    while time.time() - t_gump < 3:
+        Wait(10)
+        for i in range(GetGumpsCount()):
+            g = GetGumpInfo(i)
+            if g and 'GumpButtons' in g:
+                for btn in g['GumpButtons']:
+                    if btn.get('ReturnValue') == COMBINE_BTN:
+                        idx = i
+                        break
+            if idx != -1:
                 break
-                
-            if not TargetPresent():
-                close_all_gumps()
-                UseObject(large_serial)
-                
-                t_gump = time.time()
-                idx = -1
-                while time.time() - t_gump < 2:
-                    Wait(10)
-                    for i in range(GetGumpsCount()):
-                        g = GetGumpInfo(i)
-                        if g and 'GumpButtons' in g:
-                            for btn in g['GumpButtons']:
-                                if btn.get('ReturnValue') == COMBINE_BTN:
-                                    idx = i
-                                    break
-                        if idx != -1: break
-                    if idx != -1: break
-                    
-                if idx != -1:
-                    NumGumpButton(idx, COMBINE_BTN)
-                    WaitForTarget(5000)
-                else:
-                    break # Large BOD Gump failed to open properly
+        if idx != -1:
+            break
 
+    if idx == -1:
+        AddToSystemJournal("  Combine: Large BOD gump did not open.")
+        return False
+
+    NumGumpButton(idx, COMBINE_BTN)
+    WaitForTarget(5000)
+    return TargetPresent()
+
+
+def combine_and_store(large_serial, small_serials, config, source_book=0):
+    """Combines smalls into a Large BOD and routes to Consegna.
+    Leftover (rejected/duplicate) smalls are returned to source_book.
+
+    Game mechanic:
+      - Open Large → press Combine → target cursor appears
+      - Target a valid small → consumed → target RETURNS for the next one
+      - Target a duplicate/already-combined small → target DROPS (server rejects)
+      - All components filled → target drops naturally
+    """
+    if not large_serial:
+        return False
+
+    # Pre-check: how full is the Large already?
+    before_combined, total_components = _count_combined_smalls(large_serial)
+    if before_combined > 0:
+        if before_combined >= total_components:
+            AddToSystemJournal(
+                f"Large BOD {hex(large_serial)} already full "
+                f"({before_combined}/{total_components}). Routing to Consegna."
+            )
+            close_all_gumps()
+            consegna_serial = config.get("books", {}).get("Consegna", 0)
+            if consegna_serial:
+                MoveItem(large_serial, 1, consegna_serial, 0, 0, 0)
+                Wait(1000)
+                return True
+            return False
+        AddToSystemJournal(
+            f"Large BOD has {before_combined}/{total_components} smalls already. "
+            f"Combining {len(small_serials)} more..."
+        )
+    else:
+        AddToSystemJournal(f"Filling Large BOD with {len(small_serials)} smalls...")
+
+    # Open gump and press Combine once — target persists across valid combines
+    if not _open_large_and_combine_target(large_serial):
+        AddToSystemJournal("  Failed to open Large BOD gump.")
+        return False
+
+    combined_count = 0
+    for i, small in enumerate(small_serials):
+        if check_abort():
             if TargetPresent():
-                world_save_guard()
-                TargetToObject(small)
-                Wait(100)
-                WaitForTarget(600)
-                
-        if TargetPresent():
-            CancelTarget()
-            Wait(600)
-            
-        FindType(BOD_TYPE, Backpack())
-        if small not in list(GetFoundList()):
-            combined_successfully = True
-
-        if not combined_successfully:
-            AddToSystemJournal(f"CRITICAL: Failed to combine Small BOD {hex(small)}.")
+                CancelTarget()
             close_all_gumps()
             return False
 
+        world_save_guard()
+
+        # Already consumed (e.g. duplicate serial in list)?
+        FindType(BOD_TYPE, Backpack())
+        if small not in list(GetFoundList()):
+            AddToSystemJournal(f"  Small {i+1}/{len(small_serials)}: already consumed.")
+            continue
+
+        # If target dropped (rejected small or Large became full), re-press Combine
+        if not TargetPresent():
+            if not _open_large_and_combine_target(large_serial):
+                AddToSystemJournal(f"  Small {i+1}: could not re-open Combine target. Stopping.")
+                break
+
+        TargetToObject(small)
+        Wait(500)
+
+        # Did the small leave the backpack?
+        FindType(BOD_TYPE, Backpack())
+        if small not in list(GetFoundList()):
+            combined_count += 1
+            AddToSystemJournal(f"  Small {i+1}/{len(small_serials)}: combined OK.")
+            # Target should still be present for the next small (unless Large is now full)
+            continue
+
+        # Small still in backpack — server rejected it. Check journal for reason.
+        now = datetime.datetime.now()
+        since = now - datetime.timedelta(seconds=3)
+
+        if InJournalBetweenTimes("maximum amount", since, now) > 0:
+            AddToSystemJournal(
+                f"  Small {i+1} ({hex(small)}): already combined into this Large. Skipping."
+            )
+        elif InJournalBetweenTimes("different requested amounts", since, now) > 0:
+            AddToSystemJournal(
+                f"  Small {i+1} ({hex(small)}): amount mismatch. Skipping."
+            )
+        elif InJournalBetweenTimes("same leather type", since, now) > 0:
+            AddToSystemJournal(
+                f"  Small {i+1} ({hex(small)}): material mismatch. Skipping."
+            )
+        elif InJournalBetweenTimes("not a bulk order", since, now) > 0:
+            AddToSystemJournal(
+                f"  Small {i+1} ({hex(small)}): not a bulk order. Skipping."
+            )
+        else:
+            AddToSystemJournal(
+                f"  Small {i+1} ({hex(small)}): rejected (unknown reason). Skipping."
+            )
+
+    # Clean up
+    if TargetPresent():
+        CancelTarget()
+        Wait(300)
     close_all_gumps()
+
+    # Find leftover smalls still in backpack
+    FindType(BOD_TYPE, Backpack())
+    bp_bods = set(GetFoundList())
+    leftover_smalls = [s for s in small_serials if s in bp_bods]
+
+    # Final tooltip verification
+    final_combined, final_total = _count_combined_smalls(large_serial)
+    AddToSystemJournal(f"  Combine result: {final_combined}/{final_total} components filled.")
+
+    # Route Large to Consegna if full
+    is_full = final_total > 0 and final_combined >= final_total
     consegna_serial = config.get("books", {}).get("Consegna", 0)
-    if consegna_serial:
-        AddToSystemJournal("Dropping completely filled Large BOD into Consegna book...")
+    if is_full and consegna_serial:
+        AddToSystemJournal("Dropping filled Large BOD into Consegna book...")
         MoveItem(large_serial, 1, consegna_serial, 0, 0, 0)
         Wait(1000)
-        return True
-    return False
+    elif not is_full:
+        AddToSystemJournal("  Large BOD NOT full — leaving in backpack.")
+
+    # Route leftover smalls back to Conserva
+    if leftover_smalls:
+        conserva_serial = source_book
+        if conserva_serial:
+            AddToSystemJournal(
+                f"  Returning {len(leftover_smalls)} leftover small(s) to Conserva {hex(conserva_serial)}..."
+            )
+            for s in leftover_smalls:
+                if check_abort():
+                    break
+                world_save_guard()
+                MoveItem(s, 1, conserva_serial, 0, 0, 0)
+                Wait(800)
+        else:
+            AddToSystemJournal(f"  WARNING: {len(leftover_smalls)} leftover smalls in backpack (no source book).")
+
+    return is_full
 
 def run_assembler():
     """Reads JSON to find targets, extracts them via Reverse Sweep, and re-indexes the JSON."""

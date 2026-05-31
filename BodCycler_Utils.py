@@ -8,6 +8,9 @@ import time
 import threading
 import datetime
 import requests
+from dotenv import load_dotenv
+
+load_dotenv()
 
 _STATS_LOCK = threading.Lock()
 _INV_LOCK   = threading.Lock()

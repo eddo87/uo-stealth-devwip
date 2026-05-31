@@ -29,29 +29,43 @@ def connect():
         return False
 
 
+def probe_peer(socket_handle):
+    """Asks the DLL for getpeername() on a handle. Returns 'ip:port' or None."""
+    data = b"\xFE" + struct.pack("<Q", socket_handle)
+    resp = _send_command(data)
+    if resp and resp.strip().startswith("peer="):
+        peer = resp.strip().split("=", 1)[1]
+        return peer if peer != "none" else None
+    return None
+
+
 def set_socket_by_probe(force=False):
-    """Finds the game socket by brute-force: tries handles 4-10000 step 4,
-    sends a 0x73 ping via the DLL, first successful send = game socket.
+    """Finds the game socket by checking each handle's peer address via the DLL.
+    Skips localhost connections (DLL listener, Python bridge, etc.) and picks
+    the first handle connected to a remote server.
     Returns the winning handle or 0.
 
-    If a cached handle exists and force=False, reuses it (skips probe).
+    If a cached handle exists and force=False, validates it first.
     """
     global _cached_handle
     if _cached_handle and not force:
-        if set_socket(_cached_handle):
-            return _cached_handle
-        # Cached handle no longer valid — fall through to full probe
+        peer = probe_peer(_cached_handle)
+        if peer and not peer.startswith("127.0.0.1:"):
+            if set_socket(_cached_handle):
+                return _cached_handle
         _cached_handle = 0
 
-    ping = b"\x73" + b"\x00" * 36  # harmless UO ping packet
     for h in range(4, 10000, 4):
+        peer = probe_peer(h)
+        if not peer:
+            continue
+        if peer.startswith("127.0.0.1:"):
+            continue
         if set_socket(h):
-            result = inject_raw(ping)
-            if result is not None and result > 0:
-                AddToSystemJournal(f"PacketBridge: Game socket found at handle {h}")
-                _cached_handle = h
-                return h
-    AddToSystemJournal("PacketBridge: Socket probe exhausted — handle not found.")
+            AddToSystemJournal(f"PacketBridge: Game socket found at handle {h} -> {peer}")
+            _cached_handle = h
+            return h
+    AddToSystemJournal("PacketBridge: Socket probe exhausted — no remote connection found.")
     return 0
 
 
@@ -94,7 +108,8 @@ def _send_command(data):
                 break
             response += ch
         return response.decode("utf-8", errors="replace")
-    except Exception:
+    except Exception as e:
+        AddToSystemJournal(f"PacketBridge._send_command error: {e}")
         disconnect()
         return None
 
@@ -131,10 +146,12 @@ def inject_raw(packet_bytes):
     """
     resp = _send_command(packet_bytes)
     if resp is None:
+        AddToSystemJournal("PacketBridge.inject_raw: _send_command returned None (connection lost?)")
         return -1
     try:
         return int(resp.strip())
     except ValueError:
+        AddToSystemJournal(f"PacketBridge.inject_raw: unexpected response: {resp!r}")
         return -1
 
 

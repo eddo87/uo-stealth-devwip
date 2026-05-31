@@ -60,7 +60,8 @@ DEFAULT_CONFIG = {
         "target_trades": 2,
         "buy_cloth_amount": 80,
         "buy_cloth_enabled": True,
-        "trash_dc_bods": False
+        "trash_dc_bods": False,
+        "trash_scartare_bods": False
     },
     "books": {
         "Origine": 0,   "Conserva": 0,  "Riprova": 0,   "Consegna": 0,  "Scartare": 0
@@ -132,6 +133,7 @@ class BodCyclerGUI(threading.Thread):
         if "trade" not in self.config: self.config["trade"] = {"target_trades": 2, "buy_cloth_amount": 80, "buy_cloth_enabled": True}
         if "buy_cloth_enabled" not in self.config["trade"]: self.config["trade"]["buy_cloth_enabled"] = True
         if "trash_dc_bods" not in self.config["trade"]: self.config["trade"]["trash_dc_bods"] = False
+        if "trash_scartare_bods" not in self.config["trade"]: self.config["trade"]["trash_scartare_bods"] = False
         # Migrate legacy single 'books' dict into books_tailor if not yet split
         if "books_tailor" not in self.config:
             self.config["books_tailor"] = dict(self.config.get("books", copy.deepcopy(DEFAULT_CONFIG["books_tailor"])))
@@ -183,6 +185,8 @@ class BodCyclerGUI(threading.Thread):
             self.config["trade"]["buy_cloth_enabled"] = bool(self.vars["buy_cloth_enabled"].get())
         if "trash_dc_bods" in self.vars:
             self.config["trade"]["trash_dc_bods"] = bool(self.vars["trash_dc_bods"].get())
+        if "trash_scartare_bods" in self.vars:
+            self.config["trade"]["trash_scartare_bods"] = bool(self.vars["trash_scartare_bods"].get())
         if "crafter_profile" in self.vars:
             self.config.setdefault("bots", {})["crafter_profile"] = self.vars["crafter_profile"].get().strip()
         if "collector_profiles" in self.vars:
@@ -201,28 +205,30 @@ class BodCyclerGUI(threading.Thread):
             pass
 
     def get_target(self, category, key, label_widget=None):
-        ClientPrintEx(Self(), 1, 1, f"Target the {key}...")
-        ClientRequestObjectTarget()
-        start = time.time()
-        while not ClientTargetResponsePresent():
-            time.sleep(0.1)
-            if time.time() - start > 15: return
-        
-        response = ClientTargetResponse()
-        if response["ID"] > 0:
-            serial = response["ID"]
-            if category in ("books_tailor", "books_smith"): self.config[category][key] = serial
-            elif category == "talismans": self.config["talismans"][key] = serial
-            elif category == "books": self.config["books"][key] = serial
-            elif category == "containers": self.config["containers"][key] = serial
-            elif category == "travel": self.config["travel"][key] = serial
-            elif category in ("conserva_books_tailor", "conserva_books_smith"):
-                idx = int(key)
-                self.config[category][idx] = serial
-            self._targeted_serials.add((category, str(key)))
-            
-            if label_widget:
-                label_widget.config(text=f"{key}: {hex(serial)}", fg="blue")
+        def _run():
+            ClientPrintEx(Self(), 1, 1, f"Target the {key}...")
+            ClientRequestObjectTarget()
+            start = time.time()
+            while not ClientTargetResponsePresent():
+                time.sleep(0.1)
+                if time.time() - start > 15: return
+
+            response = ClientTargetResponse()
+            if response["ID"] > 0:
+                serial = response["ID"]
+                if category in ("books_tailor", "books_smith"): self.config[category][key] = serial
+                elif category == "talismans": self.config["talismans"][key] = serial
+                elif category == "books": self.config["books"][key] = serial
+                elif category == "containers": self.config["containers"][key] = serial
+                elif category == "travel": self.config["travel"][key] = serial
+                elif category in ("conserva_books_tailor", "conserva_books_smith"):
+                    idx = int(key)
+                    self.config[category][idx] = serial
+                self._targeted_serials.add((category, str(key)))
+
+                if label_widget and self.root:
+                    self.root.after(0, lambda: label_widget.config(text=f"{key}: {hex(serial)}", fg="blue"))
+        threading.Thread(target=_run, daemon=True).start()
 
     def set_home_spot(self, label_widget):
         x, y, z = GetX(Self()), GetY(Self()), GetZ(Self())
@@ -264,8 +270,17 @@ class BodCyclerGUI(threading.Thread):
     def trigger_scan(self):
         self.save_config()
         self.set_global_status("Running (Scan)", force=True)
-        ClientPrintEx(Self(), 1, 1, "Scanning Conserva Book...")
-        threading.Thread(target=BodCycler_Scanner.run_scanner, daemon=True).start()
+        ClientPrintEx(Self(), 1, 1, "Scanning Conserva Books...")
+        def _run():
+            try:
+                import importlib, BodCycler_ConservaManager as cm; importlib.reload(cm)
+                cycle = self.config.get("cycle_type", "Tailor")
+                cm.scan_all_books(self.config, cycle)
+                self.set_global_status("Idle")
+            except Exception as e:
+                AddToSystemJournal(f"Scan error: {e}")
+                self.set_global_status("Error (See Journal)")
+        threading.Thread(target=_run, daemon=True).start()
 
     def trigger_assemble(self):
         self.save_config()
@@ -298,7 +313,7 @@ class BodCyclerGUI(threading.Thread):
     # --- Conserva Manager Triggers ---
     def trigger_conserva_scan(self):
         self.save_config()
-        self.set_global_status("Scanning Conserva Books...")
+        self.set_global_status("Scanning Conserva Books...", force=True)
         def _run():
             try:
                 import importlib, BodCycler_ConservaManager as cm; importlib.reload(cm)
@@ -315,7 +330,7 @@ class BodCyclerGUI(threading.Thread):
     def trigger_conserva_pull_prizes(self):
         """One-way: pull wanted prizes FROM overflow/later slots INTO Best/Tier2. Never pushes out."""
         self.save_config()
-        self.set_global_status("Pulling prizes...")
+        self.set_global_status("Pulling prizes...", force=True)
         def _run():
             try:
                 import importlib, BodCycler_ConservaManager as cm; importlib.reload(cm)
@@ -341,28 +356,40 @@ class BodCyclerGUI(threading.Thread):
         threading.Thread(target=_run, daemon=True).start()
 
     def _target_move_book(self, which):
-        label = "Source" if which == "src" else "Destination"
-        ClientPrintEx(Self(), 1, 1, f"Target the {label} book...")
-        ClientRequestObjectTarget()
-        start = time.time()
-        while not ClientTargetResponsePresent():
-            time.sleep(0.1)
-            if time.time() - start > 15:
-                return
-        response = ClientTargetResponse()
-        serial = response["ID"]
-        if serial and serial > 0:
-            name = hex(serial)
-            tip = GetTooltip(serial).lower()
-            if "book name:" in tip:
-                book_name = tip.split("book name:")[-1].strip().split("|")[0].strip()
-                name = f"{book_name} ({hex(serial)})"
-            if which == "src":
-                self._move_src = serial
-                self._move_src_lbl.config(text=f"From: {name}", fg="navy")
-            else:
-                self._move_dst = serial
-                self._move_dst_lbl.config(text=f"To: {name}", fg="navy")
+        def _run():
+            label = "Source" if which == "src" else "Destination"
+            ClientPrintEx(Self(), 1, 1, f"Target the {label} book...")
+            ClientRequestObjectTarget()
+            start = time.time()
+            while not ClientTargetResponsePresent():
+                time.sleep(0.1)
+                if time.time() - start > 15:
+                    return
+            response = ClientTargetResponse()
+            serial = response["ID"]
+            if serial and serial > 0:
+                name = hex(serial)
+                tip = GetTooltip(serial).lower()
+                if "book name:" in tip:
+                    book_name = tip.split("book name:")[-1].strip().split("|")[0].strip()
+                    name = f"{book_name} ({hex(serial)})"
+                if which == "src":
+                    self._move_src = serial
+                    if self.root:
+                        self.root.after(0, lambda: self._move_src_lbl.config(text=f"From: {name}", fg="navy"))
+                else:
+                    self._move_dst = serial
+                    if self.root:
+                        self.root.after(0, lambda: self._move_dst_lbl.config(text=f"To: {name}", fg="navy"))
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _clear_move_book(self, which):
+        if which == "src":
+            self._move_src = 0
+            self._move_src_lbl.config(text="From: Not Set", fg="#888")
+        else:
+            self._move_dst = 0
+            self._move_dst_lbl.config(text="To: Not Set", fg="#888")
 
     def trigger_move_bods(self):
         src = self._move_src
@@ -373,7 +400,7 @@ class BodCyclerGUI(threading.Thread):
         if src == dst:
             AddToSystemJournal("Move BODs: Source and Destination are the same book.")
             return
-        self.set_global_status("Moving BODs...")
+        self.set_global_status("Moving BODs...", force=True)
         def _run():
             try:
                 import importlib, BodCycler_ConservaManager as cm; importlib.reload(cm)
@@ -415,7 +442,7 @@ class BodCyclerGUI(threading.Thread):
     def trigger_conserva_next_set(self):
         """DLL extract + combine + route to Consegna in one click."""
         self.save_config()
-        self.set_global_status("Combining set...")
+        self.set_global_status("Combining set...", force=True)
         overflow = getattr(self, '_conserva_overflow_mode', False)
         def _run():
             try:
@@ -466,7 +493,7 @@ class BodCyclerGUI(threading.Thread):
             AddToSystemJournal("Quick Scan: No book targeted. Click Target first.")
             return
         self.save_config()
-        self.set_global_status("Quick scanning...")
+        self.set_global_status("Quick scanning...", force=True)
         def _run():
             try:
                 import importlib, BodCycler_ConservaManager as cm; importlib.reload(cm)
@@ -481,7 +508,7 @@ class BodCyclerGUI(threading.Thread):
     def trigger_conserva_trim(self):
         """DLL-based: analyze + extract + route in one go."""
         self.save_config()
-        self.set_global_status("Executing trim...")
+        self.set_global_status("Executing trim...", force=True)
         def _run():
             try:
                 import importlib, BodCycler_ConservaManager as cm; importlib.reload(cm)
@@ -490,6 +517,52 @@ class BodCyclerGUI(threading.Thread):
                 self.set_global_status("Idle")
             except Exception as e:
                 AddToSystemJournal(f"Conserva Route error: {e}")
+                self.set_global_status("Error (See Journal)")
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _target_purge_book(self):
+        """Pick the book to purge BODs out of (runs in a thread so the GUI stays responsive)."""
+        def _run():
+            ClientPrintEx(Self(), 1, 1, "Target the book to purge...")
+            ClientRequestObjectTarget()
+            start = time.time()
+            while not ClientTargetResponsePresent():
+                time.sleep(0.1)
+                if time.time() - start > 15:
+                    return
+            serial = ClientTargetResponse().get("ID", 0)
+            if not serial or serial <= 0:
+                return
+            self._purge_book_serial = serial
+            name = hex(serial)
+            tip = GetTooltip(serial).lower()
+            if "book name:" in tip:
+                book_name = tip.split("book name:")[-1].strip().split("|")[0].strip()
+                name = f"{book_name} ({hex(serial)})"
+            if self.root:
+                self.root.after(0, lambda: self._purge_book_lbl.config(text=f"Book: {name}", fg="navy"))
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _clear_purge_book(self):
+        self._purge_book_serial = 0
+        self._purge_book_lbl.config(text="Book: Not Set", fg="#888")
+
+    def trigger_purge_set(self, spec):
+        """Drops every BOD matching `spec` out of the targeted book into the backpack,
+        one at a time (check JSON -> drop -> verify tooltip -> reindex per drop)."""
+        serial = getattr(self, "_purge_book_serial", 0)
+        if not serial:
+            AddToSystemJournal("Purge Set: No book targeted. Click Target first.")
+            return
+        self.save_config()
+        self.set_global_status("Purging set...", force=True)
+        def _run():
+            try:
+                import importlib, BodCycler_ConservaManager as cm; importlib.reload(cm)
+                status = cm.purge_set_from_book(self.config, serial, spec)
+                self.set_global_status(status or "Idle")
+            except Exception as e:
+                AddToSystemJournal(f"Purge Set error: {e}")
                 self.set_global_status("Error (See Journal)")
         threading.Thread(target=_run, daemon=True).start()
 
@@ -941,6 +1014,16 @@ class BodCyclerGUI(threading.Thread):
             Radiobutton(f_dc, text=text, variable=self.vars["trash_dc_bods"], value=val,
                         bg=BG, font=("Tahoma", 8)).pack(side=LEFT, padx=2)
 
+        # Trash Scartare BODs row
+        f_sc = Frame(t1, bg=BG)
+        f_sc.pack(fill="x", pady=2)
+        _lbl(f_sc, "Trash Scartare BODs:").pack(side=LEFT)
+        self.vars["trash_scartare_bods"] = BooleanVar(
+            value=bool(self.config.get("trade", {}).get("trash_scartare_bods", False)))
+        for text, val in (("ON", True), ("OFF", False)):
+            Radiobutton(f_sc, text=text, variable=self.vars["trash_scartare_bods"], value=val,
+                        bg=BG, font=("Tahoma", 8)).pack(side=LEFT, padx=2)
+
         # Supplies panel
         f_sup = Frame(t1, bg="#DDD8CC", relief=SUNKEN, bd=1)
         f_sup.pack(fill="x", pady=(6, 2))
@@ -1207,11 +1290,29 @@ class BodCyclerGUI(threading.Thread):
         self._move_src_lbl = _lbl(f_move, "From: Not Set", fg="#888", width=18, anchor="w")
         self._move_src_lbl.pack(side=LEFT)
         _btn(f_move, "Target", lambda: self._target_move_book("src"), width=6).pack(side=LEFT, padx=2)
+        _btn(f_move, "X", lambda: self._clear_move_book("src"),
+             width=2, bg="#FFAAAA").pack(side=LEFT, padx=1)
         Label(f_move, text=" \u2192 ", bg=BG, font=("Tahoma", 9, "bold")).pack(side=LEFT)
         self._move_dst_lbl = _lbl(f_move, "To: Not Set", fg="#888", width=18, anchor="w")
         self._move_dst_lbl.pack(side=LEFT)
         _btn(f_move, "Target", lambda: self._target_move_book("dst"), width=6).pack(side=LEFT, padx=2)
+        _btn(f_move, "X", lambda: self._clear_move_book("dst"),
+             width=2, bg="#FFAAAA").pack(side=LEFT, padx=1)
         _btn(f_move, "Move All", self.trigger_move_bods, "#FFA07A", width=8).pack(side=LEFT, padx=4)
+
+        # ── Purge Set: drop matching BODs out of a book into the backpack ──
+        Label(t6, text="── Purge Set ──", bg=BG,
+              font=("Tahoma", 8, "bold"), fg="#555").pack(fill="x", pady=(8, 2))
+        f_purge = Frame(t6, bg=BG)
+        f_purge.pack(fill="x", pady=2)
+        self._purge_book_serial = 0
+        self._purge_book_lbl = _lbl(f_purge, "Book: Not Set", fg="#888", width=24, anchor="w")
+        self._purge_book_lbl.pack(side=LEFT)
+        _btn(f_purge, "Target", lambda: self._target_purge_book(), width=6).pack(side=LEFT, padx=2)
+        _btn(f_purge, "X", lambda: self._clear_purge_book(),
+             width=2, bg="#FFAAAA").pack(side=LEFT, padx=1)
+        _btn(f_purge, "Filter / Drop…", self.open_purge_set, "#FFD0A0",
+             width=12).pack(side=LEFT, padx=4)
 
         # ── Bottom controls ────────────────────────────────────────────
         f_ctl = Frame(self.root, bg=BG, pady=6)
@@ -1325,6 +1426,105 @@ class BodCyclerGUI(threading.Thread):
 
         Button(f_btns, text="Save & Close", command=_save_close,
                bg="#1A7A1A", fg="white", font=("Tahoma", 9, "bold"),
+               relief=RAISED, bd=2).pack(side=RIGHT, padx=4)
+        Button(f_btns, text="Cancel", command=popup.destroy,
+               font=("Tahoma", 8), relief=RAISED, bd=2, bg=BG).pack(side=RIGHT, padx=2)
+
+    def open_purge_set(self):
+        """Filter dialog for Purge Set: specify category/material/quality/amount/type,
+        Preview how many match the targeted book's JSON, then drop them to the backpack."""
+        serial = getattr(self, "_purge_book_serial", 0)
+        if not serial:
+            AddToSystemJournal("Purge Set: Target a book on the Conserva tab first.")
+            return
+
+        BG = "#ECE9D8"
+        popup = Toplevel(self.root)
+        popup.title("Purge Set — drop matching BODs to backpack")
+        popup.geometry("420x320")
+        popup.resizable(False, False)
+        popup.grab_set()
+        popup.configure(bg=BG)
+
+        Label(popup, text=f"Book: {hex(serial)}", bg=BG,
+              font=("Tahoma", 9, "bold"), fg="navy").pack(anchor="w", padx=10, pady=(8, 2))
+        Label(popup, text="Blank field = match any. Drops highest position first,\n"
+                          "verifies each tooltip, reindexes the JSON per drop.",
+              bg=BG, font=("Tahoma", 8), fg="#555", justify="left").pack(anchor="w", padx=10)
+
+        form = Frame(popup, bg=BG)
+        form.pack(fill="x", padx=10, pady=6)
+
+        cat_var  = StringVar(value="")
+        mat_var  = StringVar(value="")
+        amt_var  = StringVar(value="")
+        qual_var = StringVar(value="Any")
+        type_var = StringVar(value="Any")
+
+        def _row(r, label, widget):
+            Label(form, text=label, bg=BG, font=("Tahoma", 8), width=10,
+                  anchor="w").grid(row=r, column=0, sticky="w", pady=2)
+            widget.grid(row=r, column=1, sticky="w", pady=2)
+
+        _row(0, "Category", Entry(form, textvariable=cat_var, width=22))
+        _row(1, "Material", Entry(form, textvariable=mat_var, width=22))
+        _row(2, "Amount",   Entry(form, textvariable=amt_var, width=10))
+        _row(3, "Quality",  OptionMenu(form, qual_var, "Any", "Exceptional", "Normal"))
+        _row(4, "Type",     OptionMenu(form, type_var, "Any", "Small", "Large"))
+
+        preview_lbl = Label(popup, text="", bg=BG, font=("Tahoma", 8, "bold"),
+                            fg="#003399", justify="left")
+        preview_lbl.pack(anchor="w", padx=10, pady=(2, 4))
+
+        def _build_spec():
+            spec = {
+                "category": cat_var.get().strip(),
+                "material": mat_var.get().strip(),
+                "quality":  "" if qual_var.get() == "Any" else qual_var.get(),
+                "type":     "" if type_var.get() == "Any" else type_var.get(),
+            }
+            amt = amt_var.get().strip()
+            if amt:
+                spec["amount"] = amt  # cm coerces to int when matching
+            return {k: v for k, v in spec.items() if v != ""}
+
+        def _preview():
+            spec = _build_spec()
+            if not spec:
+                preview_lbl.config(text="Empty filter — set at least one field.", fg="red")
+                return
+            def _run():
+                try:
+                    import importlib, BodCycler_ConservaManager as cm; importlib.reload(cm)
+                    res = cm.count_matching_in_book(serial, spec)
+                    if not res["consistent"]:
+                        txt = (f"JSON NOT drop-ready ({res['problems'][:1]}). "
+                               f"Run Scan first.")
+                        fg = "red"
+                    else:
+                        txt = (f"{res['matched']} of {res['total']} entries match.\n"
+                               f"Positions (desc): {res['positions'][:12]}")
+                        fg = "#003399" if res["matched"] else "#888"
+                except Exception as e:
+                    txt, fg = f"Preview error: {e}", "red"
+                if self.root:
+                    self.root.after(0, lambda: preview_lbl.config(text=txt, fg=fg))
+            threading.Thread(target=_run, daemon=True).start()
+
+        def _run_purge():
+            spec = _build_spec()
+            if not spec:
+                preview_lbl.config(text="Empty filter — refusing to drop everything.", fg="red")
+                return
+            self.trigger_purge_set(spec)
+            popup.destroy()
+
+        f_btns = Frame(popup, bg=BG)
+        f_btns.pack(fill="x", padx=10, pady=8)
+        Button(f_btns, text="Preview", command=_preview,
+               font=("Tahoma", 8), relief=RAISED, bd=2, bg="#B0E0E6").pack(side=LEFT, padx=2)
+        Button(f_btns, text="Drop Matching → Backpack", command=_run_purge,
+               bg="#CC6600", fg="white", font=("Tahoma", 9, "bold"),
                relief=RAISED, bd=2).pack(side=RIGHT, padx=4)
         Button(f_btns, text="Cancel", command=popup.destroy,
                font=("Tahoma", 8), relief=RAISED, bd=2, bg=BG).pack(side=RIGHT, padx=2)

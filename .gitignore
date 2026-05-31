@@ -25,3 +25,8 @@ _bk_zzz/
 # OS Specific
 .DS_Store
 Thumbs.db
+
+query_bridge/
+uo_packet_injector/target2/
+docs/debug_scripts/
+uo_packet_injector/target/

@@ -35,22 +35,28 @@ def update_stats(crafted=0, prized_small=0, prized_large=0):
     write_stats(stats)
 
 
-def consolidate_materials(crate_serial):
-    """Scans the backpack for loose cloth, leather, bone, and iron and moves it to the resource crate."""
-    if crate_serial == 0: 
+def consolidate_materials(crate_serial, dye_tub_serial=0):
+    """Scans the backpack for loose cloth, leather, bone, and iron and moves it to the resource crate.
+    Dyes colored cloth back to normal before crating to prevent 'Target the material' prompts."""
+    if crate_serial == 0:
         return
-    
+
+    cloth_types = {0x1766, 0x1767}
     found_any = False
-    # Materials to clean up
     for c_type in [0x1766, 0x1767, 0x1081, 0x0F7E, 0x1BF2]:
         FindType(c_type, Backpack())
         items = GetFoundList()
         if items and not found_any:
-            #AddToSystemJournal("Consolidating leftover materials into crate...")
             found_any = True
-            
+
         for item in items:
             world_save_guard()
+            if dye_tub_serial and c_type in cloth_types and GetColor(item) != 0x0000:
+                UseObject(dye_tub_serial)
+                WaitForTarget(2000)
+                if TargetPresent():
+                    TargetToObject(item)
+                    Wait(600)
             MoveItem(item, 0, crate_serial, 0, 0, 0)
             Wait(800)
 
@@ -824,6 +830,7 @@ def run_crafting_cycle():
     scartare = config['books']['Scartare']
     riprova = config['books']['Riprova']
     crate = config['containers']['MaterialCrate']
+    dye_tub = config.get('containers', {}).get('ClothDyeTub', 0)
     trash = config.get('containers', {}).get('TrashBarrel', 0)
     bbcrate = config.get('containers', {}).get('BodBookCrate', 0)
     cycle_type = config.get("cycle_type", "Tailor")
@@ -864,7 +871,7 @@ def run_crafting_cycle():
             scartare = new_scartare
 
         close_all_gumps()
-        consolidate_materials(crate) 
+        consolidate_materials(crate, dye_tub)
         
         FindType(BOD_TYPE, Backpack())
         if FindCount() > 0:

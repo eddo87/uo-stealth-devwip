@@ -96,6 +96,16 @@ def move_to_npc(npc):
         newMoveXY(GetX(npc), GetY(npc), False, 1, True)
         Wait(500)
 
+def _log_route(info, dest):
+    """One compact routing line per BOD: type material amount quality -> destination.
+    'dest' is the display label (Origine is shown as 'Fuel' — BODs queued for crafting)."""
+    btype = "Large" if (info and info.get("is_large")) else "Small"
+    mat = (info.get("material") if info else "") or "?"
+    qty = (info.get("qty_total") if info else "") or "?"
+    qual = "Exc" if (info and info.get("is_except")) else "Norm"
+    log_event("ROUTE", f"{btype} {mat} {qty} {qual} -> {dest}")
+
+
 def sort_new_bods(config):
     """Smart Sorter: Small -> Origine | Valuable Large -> Conserva | Junk/Bone Large -> Scartare | Unknown -> Riprova."""
     origine_serial  = config.get("books", {}).get("Origine", 0)
@@ -114,6 +124,7 @@ def sort_new_bods(config):
     #AddToSystemJournal(f"Sorting {len(loose_bods)} new BOD(s) from Backpack...")
     
     trash_dc = config.get("trade", {}).get("trash_dc_bods", False)
+    trash_scartare = config.get("trade", {}).get("trash_scartare_bods", False)
 
     for bod in loose_bods:
         world_save_guard()
@@ -122,7 +133,7 @@ def sort_new_bods(config):
 
         if trash_dc and info and info.get('material', '').lower() == 'dull copper':
             AddToSystemJournal(f"[DC Killswitch] Dropping Dull Copper BOD {hex(bod)} on floor.")
-            log_event("DC_TRASH", f"Dull Copper BOD {hex(bod)} ({info.get('item_name','?')}) dropped at player position.")
+            _log_route(info, "Trash")
             DropHere(bod)
             Wait(600)
             continue
@@ -162,14 +173,17 @@ def sort_new_bods(config):
                     "category": info['item_name'], # For Large BODs, item_name equates to the Category Set
                     "prize_id": info.get('prize_id')
                 }
-            elif scartare_serial != 0:
-                dest_book = scartare_serial
+            else:
+                # Classified as Scartare. Name it regardless of book config so the
+                # killswitch can trash it even when no Scartare book is set.
                 dest_name = "Scartare"
+                if scartare_serial != 0:
+                    dest_book = scartare_serial
         elif info.get('material', '').lower() == 'bone':
-            # Small bone BODs can't be crafted — route to Scartare
+            # Small bone BODs can't be crafted — classified as Scartare.
+            dest_name = "Scartare"
             if scartare_serial != 0:
                 dest_book = scartare_serial
-                dest_name = "Scartare"
         else:
             if info.get('qty_needed', 1) == 0:
                 # Already filled small — prize-enabled goes to Conserva, otherwise Consegna
@@ -192,8 +206,17 @@ def sort_new_bods(config):
                 dest_book = origine_serial
                 dest_name = "Origine"
                 
+        if trash_scartare and dest_name == "Scartare":
+            AddToSystemJournal(f"[Scartare Killswitch] Dropping Scartare BOD {hex(bod)} on floor.")
+            _log_route(info, "Trash")
+            DropHere(bod)
+            Wait(600)
+            close_all_gumps()
+            continue
+
         if dest_book != 0:
             AddToSystemJournal(f"Routing BOD to {dest_name} book...")
+            _log_route(info, "Fuel" if dest_name == "Origine" else dest_name)
             MoveItem(bod, 0, dest_book, 0, 0, 0)
             Wait(1000)
             
@@ -591,6 +614,22 @@ def process_prizes_at_home(trash_serial, material_crate_serial, dye_tub_serial, 
 
     _store_consumable(0x0FB4, prospector_crate, "Prospector's Tool")
     _store_consumable(0x1006, powder_crate,     "Powder of Fortifying")
+
+    # 5. Final cloth sweep — catches any colored cloth missed by step 2
+    if cycle_type == "Tailor" and material_crate_serial != 0:
+        for c_type in [CLOTH_1, CLOTH_2]:
+            FindType(c_type, Backpack())
+            for cloth in GetFoundList():
+                if check_abort(): return
+                world_save_guard()
+                if dye_tub_serial != 0 and GetColor(cloth) != 0x0000:
+                    UseObject(dye_tub_serial)
+                    WaitForTarget(2000)
+                    if TargetPresent():
+                        TargetToObject(cloth)
+                        Wait(600)
+                MoveItem(cloth, 0, material_crate_serial, 0, 0, 0)
+                Wait(800)
 
 def execute_trade_loop():
     config = load_config()

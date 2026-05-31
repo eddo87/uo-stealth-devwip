@@ -11,7 +11,8 @@ from collections import defaultdict
 from BodCycler_Utils import (
     BOD_BOOK_TYPE, BOD_TYPE, BOOK_GUMP_ID,
     get_inventory_file, load_config, check_abort, close_all_gumps,
-    is_prize_enabled, _INV_LOCK, world_save_guard
+    is_prize_enabled, _INV_LOCK, world_save_guard,
+    wait_for_gump_serial_change
 )
 from BodCycler_Assembler import extract_bods, append_to_inventory, find_completable_sets
 from BodCycler_Scanner import map_and_save_book_inventory
@@ -288,100 +289,254 @@ def _get_batch_size():
 
 
 def _get_overflow_dest(config, cycle_type):
-    """Returns the overflow book serial (index 2)."""
-    key = "conserva_books_tailor" if cycle_type == "Tailor" else "conserva_books_smith"
-    full_list = config.get(key, [])
-    if len(full_list) >= 3 and full_list[2] != 0:
-        return full_list[2]
-    return 0
+    """Returns the overflow book serial — index 2 of the filtered (non-zero) list,
+    matching analyze_and_plan's tier indexing (book_serials[2:] = Overflow)."""
+    serials = _get_book_serials(config, cycle_type)
+    return serials[2] if len(serials) >= 3 else 0
+
+
+def _auto_inject_dll():
+    """Attempts to auto-inject the packet injector DLL into the Stealth process.
+    Returns True if injection succeeded (or was already loaded).
+    """
+    try:
+        import inject_dll
+        pid = inject_dll.find_stealth_pid()
+        if not pid:
+            AddToSystemJournal("PacketBridge: Cannot find stealth.exe for auto-injection.")
+            return False
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        dll_candidates = [
+            os.path.join(script_dir, "uo_packet_injector.dll"),
+            os.path.join(script_dir, "uo_packet_injector", "target", "release", "uo_packet_injector.dll"),
+        ]
+        dll_path = next((p for p in dll_candidates if os.path.exists(p)), None)
+        if not dll_path:
+            AddToSystemJournal("PacketBridge: uo_packet_injector.dll not found for auto-injection.")
+            return False
+        AddToSystemJournal(f"PacketBridge: Auto-injecting DLL into PID {pid}...")
+        ok = inject_dll.inject(pid, dll_path)
+        if ok:
+            AddToSystemJournal("PacketBridge: DLL injected successfully.")
+            time.sleep(1)
+        return ok
+    except Exception as e:
+        AddToSystemJournal(f"PacketBridge: Auto-injection failed — {e}")
+        return False
 
 
 def _ensure_bridge():
-    """Connects to the DLL packet bridge and sets the game socket handle.
-    Reuses cached handle from previous successful probe; only force-probes
-    on first call or after a failed injection.
+    """Connects to the DLL packet bridge. Auto-injects the DLL if needed.
+    Uses the DLL's own captured socket handle when available — only falls
+    back to brute-force probe if the DLL hasn't captured one yet.
     """
     try:
         import BodCycler_PacketBridge as pb
         if not pb.is_connected():
             if not pb.connect():
-                AddToSystemJournal("PacketBridge: Cannot connect. Is DLL injected? (python inject_dll.py)")
-                return False
+                _auto_inject_dll()
+                if not pb.connect():
+                    AddToSystemJournal("PacketBridge: Cannot connect after auto-injection attempt.")
+                    return False
         st = pb.status()
-        AddToSystemJournal(f"PacketBridge pre-probe status: captured={st.get('captured')} socket={st.get('socket')}")
-        h = pb.set_socket_by_probe()  # reuses cached handle if available
+        captured = st.get("captured", False)
+        dll_socket = st.get("socket", 0)
+        AddToSystemJournal(f"PacketBridge: captured={captured} socket={dll_socket}")
+
+        if captured and dll_socket:
+            # DLL already knows the game socket — use it directly
+            if pb.set_socket(dll_socket):
+                AddToSystemJournal(f"PacketBridge: Using DLL-captured socket {dll_socket}")
+                return True
+            AddToSystemJournal(f"PacketBridge: DLL socket {dll_socket} rejected, falling back to probe.")
+
+        # DLL hasn't captured a socket yet — probe for it
+        h = pb.set_socket_by_probe(force=True)
         if not h:
-            AddToSystemJournal("PacketBridge: Socket probe failed. Is Stealth connected to the server?")
+            AddToSystemJournal("PacketBridge: Socket probe failed. Is Stealth connected?")
             return False
-        AddToSystemJournal(f"PacketBridge: Using socket handle {h}")
+        AddToSystemJournal(f"PacketBridge: Using probed socket {h}")
         return True
     except ImportError:
         AddToSystemJournal("PacketBridge: Module not found.")
         return False
 
 
-def _dll_extract_batch(book_serial, positions):
-    """Extracts BODs from a book using DLL packet injection.
-    Book must be in backpack. Opens it, injects 0xB1 per position (descending),
-    waits for serial refresh between each drop.
-    Returns list of extracted BOD serials in backpack.
+def _open_book_gump(book_serial):
+    """Opens a BOD book and polls until the gump is confirmed present.
+    Moves the book to backpack if needed.
+    Returns (gump_index, gump_serial) or (-1, 0) on failure.
     """
-    import BodCycler_PacketBridge as pb
-
-    # Book must be directly in backpack for UseObject to open the gump reliably.
-    # If it's in a crate or closed container, move it first.
     FindType(BOD_BOOK_TYPE, Backpack())
     if book_serial not in set(GetFoundList()):
-        AddToSystemJournal(f"  Moving {hex(book_serial)} to backpack for extraction...")
+        AddToSystemJournal(f"  Moving {hex(book_serial)} to backpack...")
         MoveItem(book_serial, 1, Backpack(), 0, 0, 0)
         Wait(1200)
 
     close_all_gumps()
     UseObject(book_serial)
-    Wait(2000)
 
+    idx = -1
+    serial = 0
+    deadline = time.time() + 4
+    while time.time() < deadline:
+        Wait(50)
+        for i in range(GetGumpsCount()):
+            if GetGumpID(i) == BOOK_GUMP_ID:
+                idx = i
+                serial = GetGumpInfo(i)["Serial"]
+                break
+        if idx != -1:
+            break
+
+    if idx == -1:
+        AddToSystemJournal(f"  Failed to open book {hex(book_serial)}")
+    else:
+        AddToSystemJournal(f"  Book gump open: idx={idx} serial={serial}")
+    return idx, serial
+
+
+def _reindex_inventory(inventory, dropped_positions):
+    """Remove the dropped positions and renumber the remaining entries 0..N-1,
+    recomputing the global drop_btn (5+pos*2) and page to mirror UO's server-side
+    compaction. Pure (no I/O) so it's unit-testable.
+
+    Pass ONLY the positions that actually dropped — passing requested-but-undropped
+    positions deletes entries still in the book and desyncs every later pos/drop_btn.
+    """
+    dropped = set(dropped_positions)
+    remaining = [b for b in inventory if b.get("pos") not in dropped]
+    for new_pos, entry in enumerate(remaining):
+        entry["pos"] = new_pos
+        entry["drop_btn"] = 5 + (new_pos * 2)
+        entry["page"] = new_pos // 5
+    return remaining
+
+
+def _check_inventory_consistent(inventory):
+    """Pre-drop validation: positions must be dense 0..N-1 and drop_btn == 5+pos*2.
+    A drop computes its button from the recorded pos, so a gap or stale drop_btn
+    means injecting the wrong global button. Returns (ok, [problems]). Pure."""
+    problems = []
+    for i, e in enumerate(inventory):
+        if e.get("pos") != i:
+            problems.append(f"pos gap at idx {i}: got {e.get('pos')}")
+        if e.get("drop_btn") != 5 + i * 2:
+            problems.append(f"drop_btn off at pos {i}: got {e.get('drop_btn')}")
+    return (not problems), problems
+
+
+def _entry_matches_filter(entry, spec):
+    """True if entry matches every non-empty key in spec. Strings compare
+    case-insensitively; amount compares as int. Empty/None spec values = 'any'.
+    Pure — drives both the GUI preview count and the live purge selection."""
+    for key, want in spec.items():
+        if want is None or want == "":
+            continue
+        have = entry.get(key)
+        if key == "amount":
+            try:
+                if int(have) != int(want):
+                    return False
+            except (TypeError, ValueError):
+                return False
+        else:
+            if str(have).lower() != str(want).lower():
+                return False
+    return True
+
+
+def _verify_dropped_tooltip(tooltip, entry):
+    """Confirm a just-dropped BOD's tooltip matches the inventory entry it should be.
+    'with <material> ingots' uses the FULL material name (Copper != Dull Copper);
+    '<type> bulk order' stops a Large being mistaken for a Small. Returns
+    (checks_dict, all_ok). Mirrors the validated _inject_debug.py harness."""
+    low = (tooltip or "").lower()
+    checks = {
+        "item": entry["item"].lower() in low,
+        "material": f"with {entry['material'].lower()} ingots" in low,
+        "amount": f"amount to make: {entry['amount']}" in low,
+        "type": f"{entry['type'].lower()} bulk order" in low,
+    }
+    if entry.get("quality") == "Exceptional":
+        checks["quality"] = "must be exceptional" in low
+    return checks, all(checks.values())
+
+
+def count_matching_in_book(book_serial, spec):
+    """GUI preview helper: load a book's inventory JSON and report how many entries
+    match the filter spec, plus whether the JSON is drop-ready. No game interaction.
+    Returns {total, matched, consistent, problems, positions}."""
+    inv_file = get_inventory_file(book_serial)
+    if not os.path.exists(inv_file):
+        return {"total": 0, "matched": 0, "consistent": False,
+                "problems": ["no inventory JSON — run Scan first"], "positions": []}
+    try:
+        with open(inv_file, "r") as f:
+            inv = json.load(f)
+    except (OSError, ValueError) as e:
+        return {"total": 0, "matched": 0, "consistent": False,
+                "problems": [f"failed to read JSON — {e}"], "positions": []}
+    ok, problems = _check_inventory_consistent(inv)
+    matches = [e for e in inv if _entry_matches_filter(e, spec)]
+    matches.sort(key=lambda e: e["pos"], reverse=True)
+    return {"total": len(inv), "matched": len(matches), "consistent": ok,
+            "problems": problems[:10], "positions": [e["pos"] for e in matches]}
+
+
+def _dll_extract_batch(book_serial, positions):
+    """Extracts BODs from a book using DLL packet injection.
+    Book must be in backpack. Opens it (or reuses an already-open gump),
+    injects 0xB1 per position (descending), waits for serial refresh between each drop.
+    Returns list of extracted BOD serials in backpack.
+    """
+    import BodCycler_PacketBridge as pb
+
+    # Reuse already-open book gump if present; otherwise open it.
     idx = -1
     for i in range(GetGumpsCount()):
         if GetGumpID(i) == BOOK_GUMP_ID:
             idx = i
             break
     if idx == -1:
-        AddToSystemJournal(f"  Failed to open book {hex(book_serial)}")
-        return []
+        idx, _ = _open_book_gump(book_serial)
+        if idx == -1:
+            return []
 
     FindType(BOD_TYPE, Backpack())
     bp_before = set(GetFoundList())
+
+    # Read initial gump serial
+    current_serial = 0
+    for i in range(GetGumpsCount()):
+        if GetGumpID(i) == BOOK_GUMP_ID:
+            current_serial = GetGumpInfo(i)["Serial"]
+            break
 
     dropped = 0
     for pos in positions:
         if check_abort():
             break
 
-        # Wait for gump to be present (serial stays constant — it's the book serial)
-        serial = 0
-        timeout = time.time() + 3
-        while time.time() < timeout:
-            if check_abort():
+        # First drop uses the serial we already have; subsequent drops wait for change
+        if dropped > 0:
+            idx, current_serial, changed = wait_for_gump_serial_change(
+                current_serial, BOOK_GUMP_ID, 3000
+            )
+            if not changed:
+                AddToSystemJournal(f"  Gump serial didn't refresh after {dropped} drops.")
                 break
-            for i in range(GetGumpsCount()):
-                if GetGumpID(i) == BOOK_GUMP_ID:
-                    serial = GetGumpInfo(i)["Serial"]
-                    break
-            if serial:
-                break
-            Wait(100)
-
-        if not serial:
-            AddToSystemJournal(f"  Gump lost after {dropped} drops.")
-            break
 
         btn = 5 + (pos * 2)
-        result = pb.send_gump_response(serial, BOOK_GUMP_ID, btn)
+        AddToSystemJournal(
+            f"  DLL drop: pos={pos} btn={btn} serial={current_serial} "
+            f"(hex={hex(current_serial)})"
+        )
+        result = pb.send_gump_response(current_serial, BOOK_GUMP_ID, btn)
         if result > 0:
             dropped += 1
-            Wait(300)  # let server process the drop before next inject
         else:
-            AddToSystemJournal(f"  Inject failed at pos {pos}")
+            AddToSystemJournal(f"  Inject failed at pos {pos} (result={result})")
             break
 
     Wait(500)
@@ -391,7 +546,13 @@ def _dll_extract_batch(book_serial, positions):
     bp_after = set(GetFoundList())
     new_bods = list(bp_after - bp_before)
 
-    AddToSystemJournal(f"  Extracted {len(new_bods)} BODs from {hex(book_serial)}")
+    if dropped > 0 and len(new_bods) == 0:
+        AddToSystemJournal(
+            f"  WARNING: DLL sent {dropped} packets but 0 BODs appeared — "
+            f"server rejected the injected 0xB1 packets."
+        )
+
+    AddToSystemJournal(f"  DLL extracted {len(new_bods)} BODs from {hex(book_serial)}")
     return new_bods
 
 
@@ -400,13 +561,6 @@ def _numgump_extract_batch(book_serial, max_drops):
     Slower than the DLL path (one gump-open per BOD) but works without the injector.
     Mirrors the proven pattern from BodCycler_Crafting.extract_bod_from_origine.
     """
-    # Ensure book is in backpack before any UseObject call.
-    FindType(BOD_BOOK_TYPE, Backpack())
-    if book_serial not in set(GetFoundList()):
-        AddToSystemJournal(f"  Moving {hex(book_serial)} to backpack for extraction...")
-        MoveItem(book_serial, 1, Backpack(), 0, 0, 0)
-        Wait(1200)
-
     FindType(BOD_TYPE, Backpack())
     bp_before = set(GetFoundList())
 
@@ -415,19 +569,7 @@ def _numgump_extract_batch(book_serial, max_drops):
         if check_abort():
             break
 
-        close_all_gumps()
-        UseObject(book_serial)
-
-        idx = -1
-        deadline = time.time() + 3
-        while time.time() < deadline:
-            for i in range(GetGumpsCount()):
-                if GetGumpID(i) == BOOK_GUMP_ID:
-                    idx = i
-                    break
-            if idx != -1:
-                break
-            Wait(100)
+        idx, _ = _open_book_gump(book_serial)
         if idx == -1:
             AddToSystemJournal(f"  Fallback: failed to open book {hex(book_serial)} after {dropped} drops.")
             break
@@ -441,6 +583,12 @@ def _numgump_extract_batch(book_serial, max_drops):
     new_bods = list(bp_after - bp_before)
     AddToSystemJournal(f"  Fallback extracted {len(new_bods)} BODs from {hex(book_serial)}")
     return new_bods
+
+
+def _backpack_bods():
+    """All BOD serials currently sitting in the backpack."""
+    FindType(BOD_TYPE, Backpack())
+    return list(GetFoundList())
 
 
 def _route_bods_to_book(bod_serials, dest_book):
@@ -463,26 +611,46 @@ def _get_book_bod_count(book_serial):
     return int(m.group(1)) if m else 0
 
 
+BOOK_MAX_DEEDS = 500  # UO bulk order book capacity
+
+
 def move_all_bods(config, source_book, dest_book):
-    """Extracts all BODs from source_book and routes them to dest_book.
-    Uses DLL packet injection when available; falls back to NumGumpButton otherwise.
-    Returns a status string describing the outcome.
+    """Empties source_book into dest_book, one backpack-sized batch at a time.
+
+    Flow:
+      1. Move any BODs already sitting in the backpack into dest_book — clears the
+         backpack first so the drain item-count is accurate.
+      2. Per batch: close any open gump, open source_book by serial, then fire global
+         drop button 5 (always position 0 — each drop shifts the next BOD up, so btn 5
+         drains the book from the top) up to the free backpack space (125 - safety).
+      3. Pause, close the book gump, then move the drained BODs into dest_book.
+      4. Repeat until the source book is empty, the destination is full (500), or a
+         pass makes no progress.
+
+    The destination 500-deed cap bounds each batch so BODs are never drained out of the
+    source only to be stranded in a full destination. DLL packet injection (btn 5 per
+    drop) when available; NumGumpButton fallback otherwise. Returns a status string.
     """
-    total = _get_book_bod_count(source_book)
-    if total == 0:
+    # 1. Clear pre-existing backpack BODs into the destination first.
+    pre_existing = _route_bods_to_book(_backpack_bods(), dest_book)
+    if pre_existing:
+        AddToSystemJournal(
+            f"Move BODs: moved {pre_existing} pre-existing backpack BOD(s) -> {hex(dest_book)}"
+        )
+
+    source_total = _get_book_bod_count(source_book)
+    if source_total == 0:
         AddToSystemJournal(f"Move BODs: Source book {hex(source_book)} is empty.")
+        if pre_existing:
+            return f"Move BODs: source empty; {pre_existing} backpack BOD(s) moved"
         return f"Move BODs: source empty ({hex(source_book)})"
 
-    # DLL preferred (batch ~60 per open); NumGumpButton fallback (1 per open).
-    if _ensure_bridge():
-        extract_fn = lambda book, batch: _dll_extract_batch(book, [0] * batch)
-        mode = "DLL"
-    else:
+    use_dll = _ensure_bridge()
+    mode = "DLL" if use_dll else "NumGumpButton"
+    if not use_dll:
         AddToSystemJournal("Move BODs: DLL bridge unavailable — using NumGumpButton fallback (slower).")
-        extract_fn = _numgump_extract_batch
-        mode = "NumGumpButton"
 
-    AddToSystemJournal(f"Move BODs [{mode}]: {total} BODs from {hex(source_book)} -> {hex(dest_book)}")
+    AddToSystemJournal(f"Move BODs [{mode}]: {source_total} BODs from {hex(source_book)} -> {hex(dest_book)}")
     moved = 0
     aborted_reason = None
 
@@ -495,25 +663,49 @@ def move_all_bods(config, source_book, dest_book):
         if remaining == 0:
             break
 
-        batch_size = min(_get_batch_size(), remaining)
-        if batch_size <= 0:
-            AddToSystemJournal("  Backpack full.")
-            aborted_reason = "backpack full"
+        # Destination item-limit (500). Stop before draining into a full book.
+        dest_count = _get_book_bod_count(dest_book)
+        dest_free = BOOK_MAX_DEEDS - dest_count
+        if dest_free <= 0:
+            aborted_reason = f"destination full ({dest_count}/{BOOK_MAX_DEEDS})"
             break
 
-        extracted = extract_fn(source_book, batch_size)
-        if not extracted:
-            AddToSystemJournal("  Extraction failed.")
-            aborted_reason = "extraction failed"
-            break
+        # Batch is bounded by free backpack space AND remaining dest room.
+        batch = max(1, min(_get_batch_size(), remaining, dest_free))
 
-        routed = _route_bods_to_book(extracted, dest_book)
+        # --- DROP PHASE: close any gump, open the From book by serial, then drop. ---
+        if use_dll:
+            close_all_gumps()
+            Wait(400)
+            idx, _ = _open_book_gump(source_book)
+            if idx == -1:
+                aborted_reason = "could not open source book"
+                break
+            fast_drop_bods(source_book, [0] * batch)
+        else:
+            _numgump_extract_batch(source_book, batch)
+
+        # --- MOVE PHASE: pause, close the book gump, move drained BODs to dest. ---
+        Wait(500)
+        close_all_gumps()
+        Wait(300)
+        routed = _route_bods_to_book(_backpack_bods(), dest_book)
         moved += routed
+        Wait(300)
 
-    AddToSystemJournal(f"Move BODs complete: {moved}/{total} moved.")
+        # Guard against spinning: if a full pass didn't shrink the source, stop.
+        if _get_book_bod_count(source_book) >= remaining:
+            aborted_reason = "no progress (stopped to avoid loop)"
+            break
+
+    AddToSystemJournal(
+        f"Move BODs complete: {moved}/{source_total} drained + moved "
+        f"(dest now {_get_book_bod_count(dest_book)}/{BOOK_MAX_DEEDS})."
+    )
+    note = f"; +{pre_existing} from backpack" if pre_existing else ""
     if aborted_reason:
-        return f"Move BODs [{mode}]: {moved}/{total} moved ({aborted_reason})"
-    return f"Move BODs [{mode}]: {moved}/{total} moved"
+        return f"Move BODs [{mode}]: {moved}/{source_total} moved ({aborted_reason}){note}"
+    return f"Move BODs [{mode}]: {moved}/{source_total} moved{note}"
 
 
 def execute_trim(config, cycle_type, mode="all"):
@@ -532,12 +724,11 @@ def execute_trim(config, cycle_type, mode="all"):
     tier2 = config.get("conserva_manager", {}).get("keep_tier2", 6)
     overflow_dest = _get_overflow_dest(config, cycle_type)
 
-    # Tier membership from CONFIG slot positions (not filtered array indices)
-    config_key = "conserva_books_tailor" if cycle_type == "Tailor" else "conserva_books_smith"
-    config_list = config.get(config_key, [0]*3)
-    tier1_book = config_list[0] if len(config_list) > 0 and config_list[0] != 0 else None
-    tier2_books = [s for i, s in enumerate(config_list) if i == 1 and s != 0]
-    overflow_config_books = set(s for i, s in enumerate(config_list) if i >= 2 and s != 0)
+    # Tier membership from the SAME filtered list passed to analyze_and_plan
+    # (book_serials[0]=Tier1, [1]=Tier2, [2:]=Overflow) so the planner's moves
+    # and the executor's tier filtering agree even when config slots have gaps.
+    tier1_book = book_serials[0] if len(book_serials) >= 1 else None
+    tier2_books = book_serials[1:2] if len(book_serials) >= 2 else []
     tier_books_set = set()
     if tier1_book: tier_books_set.add(tier1_book)
     for tb in tier2_books: tier_books_set.add(tb)
@@ -961,7 +1152,7 @@ def check_completable_sets(config, cycle_type, overflow_only=False):
     if total_sets == 0:
         AddToSystemJournal("  No completable sets found.")
     else:
-        AddToSystemJournal(f"  TOTAL: {total_sets} set(s). Click 'Next Set' to extract + combine one.")
+        AddToSystemJournal(f"  TOTAL: {total_sets} set(s). Click 'Combine Set' to extract + combine one.")
     return total_sets
 
 
@@ -975,13 +1166,17 @@ def extract_and_combine_next_set(config, cycle_type, overflow_only=False):
     import BodCycler_Crafting
 
     use_dll = _ensure_bridge()
+    AddToSystemJournal(f"Combine Set: DLL={'yes' if use_dll else 'no'}, cycle={cycle_type}, overflow={overflow_only}")
 
     book_serials = _get_book_serials(config, cycle_type)
+    AddToSystemJournal(f"Combine Set: {len(book_serials)} books configured")
     if overflow_only:
         key = "conserva_books_tailor" if cycle_type == "Tailor" else "conserva_books_smith"
         full_list = config.get(key, [])
         book_serials = [s for i, s in enumerate(full_list) if i >= 2 and s != 0]
+        AddToSystemJournal(f"Combine Set: overflow filter -> {len(book_serials)} books")
     inventories = load_all_inventories(book_serials)
+    AddToSystemJournal(f"Combine Set: loaded inventories for {len(inventories)} books")
 
     # Find first completable set
     target_set = None
@@ -1012,12 +1207,20 @@ def extract_and_combine_next_set(config, cycle_type, overflow_only=False):
     )
     AddToSystemJournal(f"  From {hex(target_book)}: 1 Large + {len(smalls)} Smalls")
 
+    # Open the book now so it's visible in-game before extraction starts
+    idx, gump_serial = _open_book_gump(target_book)
+    if idx == -1:
+        return False
+
     # Extract specific set BODs by position (descending so indices don't shift)
     all_set_bods = [large] + smalls
     positions = sorted([b['pos'] for b in all_set_bods], reverse=True)
 
     if use_dll:
         extracted = _dll_extract_batch(target_book, positions)
+        # Drops are descending and stop at the first failure, so the BODs that
+        # actually landed are the first len(extracted) of the requested positions.
+        dropped_positions = positions[:len(extracted)]
         mode_label = "DLL"
     else:
         AddToSystemJournal("  DLL unavailable — using page-flip extraction (slower).")
@@ -1028,6 +1231,8 @@ def extract_and_combine_next_set(config, cycle_type, overflow_only=False):
             Wait(1200)
         extracted_map = extract_bods(target_book, list(all_set_bods))
         extracted = list(extracted_map.values())
+        # extracted_map is keyed by the positions that actually dropped.
+        dropped_positions = list(extracted_map.keys())
         mode_label = "page-flip"
 
     if not extracted:
@@ -1054,8 +1259,8 @@ def extract_and_combine_next_set(config, cycle_type, overflow_only=False):
 
     AddToSystemJournal(f"  Large: {hex(large_serial)} | Smalls: {len(small_serials)}")
 
-    # Combine and route to Consegna
-    success = combine_and_store(large_serial, small_serials, config)
+    # Combine and route to Consegna; leftover smalls go back to source book
+    success = combine_and_store(large_serial, small_serials, config, source_book=target_book)
 
     if success:
         AddToSystemJournal("  Combined and routed to Consegna!")
@@ -1066,24 +1271,25 @@ def extract_and_combine_next_set(config, cycle_type, overflow_only=False):
     else:
         AddToSystemJournal("  FAILED to combine. Check backpack.")
 
-    # Reindex source book JSON
-    extracted_positions = set(positions)
+    # Reindex source book JSON — remove only the positions that ACTUALLY dropped,
+    # not every requested position. A partial extraction (e.g. serial stuck after
+    # 2 of 4 drops) would otherwise delete entries still in the book and shift
+    # every later pos/drop_btn out of sync with the live gump.
     inv_file = get_inventory_file(target_book)
     if os.path.exists(inv_file):
         try:
             with _INV_LOCK:
                 with open(inv_file, "r") as f:
                     inventory = json.load(f)
-                inventory = [b for b in inventory if b.get("pos") not in extracted_positions]
-                for new_pos, entry in enumerate(inventory):
-                    entry["pos"] = new_pos
-                    entry["drop_btn"] = 5 + (new_pos * 2)
-                    entry["page"] = new_pos // 5
+                inventory = _reindex_inventory(inventory, dropped_positions)
                 tmp = inv_file + ".tmp"
                 with open(tmp, "w") as f:
                     json.dump(inventory, f, indent=4)
                 os.replace(tmp, inv_file)
-            AddToSystemJournal(f"  JSON reindexed: {len(inventory)} remaining in {hex(target_book)}")
+            AddToSystemJournal(
+                f"  JSON reindexed: removed {len(dropped_positions)}, "
+                f"{len(inventory)} remaining in {hex(target_book)}"
+            )
         except Exception as e:
             AddToSystemJournal(f"  WARNING: Reindex failed — {e}")
 
@@ -1095,14 +1301,155 @@ def extract_and_combine_next_set(config, cycle_type, overflow_only=False):
     return success
 
 
+def purge_set_from_book(config, book_serial, spec):
+    """Drop every BOD matching `spec` out of `book_serial` into the backpack,
+    one at a time, following the validated per-drop loop:
+      check JSON -> pick highest matching pos -> inject 0xB1 -> verify tooltip
+      -> reindex+save that single pos.
+    Stops the instant a tooltip mismatches (the live book has diverged from the
+    JSON) so it never injects off stale data.
+
+    `spec` keys: category, material, quality, amount, type (any blank = wildcard).
+    Dropped BODs are LEFT in the backpack — purge only removes them from the book.
+    Returns a one-line status string.
+    """
+    if not book_serial:
+        AddToSystemJournal("Purge Set: No book targeted.")
+        return "Purge: no book"
+
+    spec = {k: v for k, v in spec.items() if v not in (None, "")}
+    if not spec:
+        AddToSystemJournal("Purge Set: Empty filter — refusing to drop everything.")
+        return "Purge: empty filter (refused)"
+
+    inv_file = get_inventory_file(book_serial)
+    if not os.path.exists(inv_file):
+        AddToSystemJournal(f"Purge Set: No inventory for {hex(book_serial)} — run Scan first.")
+        return "Purge: no inventory JSON"
+
+    # Pre-flight: validate JSON + confirm there's something to drop before touching the game.
+    with open(inv_file, "r") as f:
+        inv = json.load(f)
+    ok, problems = _check_inventory_consistent(inv)
+    if not ok:
+        AddToSystemJournal(f"Purge Set: JSON inconsistent — NOT dropping. {problems[:3]}")
+        return "Purge: JSON inconsistent (rescan)"
+    matches = [e for e in inv if _entry_matches_filter(e, spec)]
+    if not matches:
+        AddToSystemJournal(f"Purge Set: 0 entries match {spec} in {hex(book_serial)}.")
+        return "Purge: 0 matches"
+    AddToSystemJournal(
+        f"Purge Set: {len(matches)} match {spec} in {hex(book_serial)} -> backpack"
+    )
+
+    if not _ensure_bridge():
+        AddToSystemJournal("Purge Set: DLL bridge unavailable — aborting.")
+        return "Purge: DLL unavailable"
+    import BodCycler_PacketBridge as pb
+
+    idx, _ = _open_book_gump(book_serial)
+    if idx == -1:
+        return "Purge: failed to open book"
+
+    prev_serial = None
+    dropped = 0
+    # Drop highest pos first. A high drop never shifts a lower pos, so after each
+    # reindex the next matching entry is still at its recorded pos.
+    while True:
+        if check_abort():
+            AddToSystemJournal("Purge Set: aborted.")
+            break
+
+        # Re-read + re-check the JSON every iteration (check-before-every-drop).
+        with open(inv_file, "r") as f:
+            inv = json.load(f)
+        ok, problems = _check_inventory_consistent(inv)
+        if not ok:
+            AddToSystemJournal(f"Purge Set: JSON drifted mid-run — stopping. {problems[:3]}")
+            break
+        targets = sorted(
+            [e for e in inv if _entry_matches_filter(e, spec)],
+            key=lambda e: e["pos"], reverse=True,
+        )
+        if not targets:
+            break
+        entry = targets[0]
+        pos = entry["pos"]
+        btn = 5 + pos * 2
+
+        # Current gump serial — re-read before EVERY inject (it changes per drop);
+        # wait for it to advance after the previous drop.
+        cur_serial = 0
+        for i in range(GetGumpsCount()):
+            if GetGumpID(i) == BOOK_GUMP_ID:
+                cur_serial = GetGumpInfo(i).get("Serial", 0)
+                break
+        if not cur_serial:
+            AddToSystemJournal("Purge Set: book gump closed — stopping.")
+            break
+        if prev_serial is not None and cur_serial == prev_serial:
+            _, cur_serial, changed = wait_for_gump_serial_change(prev_serial, BOOK_GUMP_ID, 3000)
+            if not changed:
+                AddToSystemJournal(f"Purge Set: gump serial stuck after {dropped} drops — stopping.")
+                break
+
+        FindType(BOD_TYPE, Backpack())
+        before = set(GetFoundList())
+        result = pb.send_gump_response(cur_serial, BOOK_GUMP_ID, btn)
+        Wait(1500)
+        prev_serial = cur_serial
+        if result <= 0:
+            AddToSystemJournal(f"Purge Set: inject failed at pos {pos} (result={result}) — stopping.")
+            break
+
+        FindType(BOD_TYPE, Backpack())
+        new_bods = set(GetFoundList()) - before
+        if not new_bods:
+            AddToSystemJournal(f"Purge Set: no BOD appeared after pos {pos} — stopping.")
+            break
+
+        s_drop = next(iter(new_bods))
+        tip = GetTooltip(s_drop) or ""
+        checks, verified = _verify_dropped_tooltip(tip, entry)
+        if not verified:
+            AddToSystemJournal(
+                f"Purge Set: tooltip MISMATCH at pos {pos} (checks={checks}) — "
+                f"JSON left intact, stopping (live book diverged)."
+            )
+            break
+
+        # Verified — reindex that single pos and persist atomically.
+        with _INV_LOCK:
+            with open(inv_file, "r") as f:
+                inv = json.load(f)
+            inv = _reindex_inventory(inv, [pos])
+            tmp = inv_file + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(inv, f, indent=4)
+            os.replace(tmp, inv_file)
+        dropped += 1
+        AddToSystemJournal(
+            f"Purge Set: dropped {entry['type']} {entry['material']} {entry['item']} "
+            f"(pos {pos}) -> {hex(s_drop)}; {len(inv)} left in book."
+        )
+
+    close_all_gumps()
+    final = count_matching_in_book(book_serial, spec)
+    status = f"Purge done: {dropped} dropped, {final['matched']} still match"
+    AddToSystemJournal(f"Purge Set: {status}")
+    return status
+
+
 # ---------------------------------------------------------------------------
 # Fast Drop via DLL Injection (bypasses page flipping)
 # ---------------------------------------------------------------------------
 
-def fast_drop_bods(book_serial, positions, pause_ms=300):
+def fast_drop_bods(book_serial, positions):
     """Drops BODs from a book using raw 0xB1 packets via the injected DLL.
-    Book must be open (UseObject already called). Reads gump serial once
-    (stable on this shard) and loops btn=5 with a fixed pause between drops.
+    Book must already be open (UseObject called). Re-reads the current gump
+    serial before each drop (it changes after every drop), and presses the
+    global drop button btn = 5 + pos*2 for each position. Page is irrelevant —
+    the server honors the global index regardless of the displayed page.
     Returns number of successful drops.
     """
     try:
@@ -1120,7 +1467,7 @@ def fast_drop_bods(book_serial, positions, pause_ms=300):
         AddToSystemJournal("PacketBridge: Module not found. DLL injection not available.")
         return 0
 
-    # Read gump serial once — stable across drops on this shard
+    # Read initial gump serial
     gump_serial = 0
     for i in range(GetGumpsCount()):
         if GetGumpID(i) == BOOK_GUMP_ID:
@@ -1130,283 +1477,32 @@ def fast_drop_bods(book_serial, positions, pause_ms=300):
         AddToSystemJournal("FastDrop: No book gump open.")
         return 0
 
+    AddToSystemJournal(
+        f"FastDrop: book={hex(book_serial)} gumpID={hex(BOOK_GUMP_ID)} "
+        f"initial_serial={gump_serial}"
+    )
+
+    current_serial = gump_serial
     dropped = 0
     for pos in positions:
         if check_abort():
             break
+
+        if dropped > 0:
+            _, current_serial, changed = wait_for_gump_serial_change(
+                current_serial, BOOK_GUMP_ID, 3000
+            )
+            if not changed:
+                AddToSystemJournal(f"FastDrop: gump serial stuck after {dropped} drops.")
+                break
+
         btn = 5 + (pos * 2)
-        result = pb.send_gump_response(gump_serial, BOOK_GUMP_ID, btn)
+        result = pb.send_gump_response(current_serial, BOOK_GUMP_ID, btn)
         if result > 0:
             dropped += 1
-            Wait(pause_ms)
         else:
             AddToSystemJournal(f"FastDrop: inject failed at pos {pos} (result={result})")
             break
 
     AddToSystemJournal(f"FastDrop: {dropped}/{len(positions)} BODs dropped.")
     return dropped
-
-
-# ---------------------------------------------------------------------------
-# Phase C — Execute Reorganization (game interaction)
-# ---------------------------------------------------------------------------
-
-MAX_BATCH = 20  # Extract at most this many BODs before routing them (backpack safety)
-
-
-def _extract_from_book(book_serial, target_bods, crate_serial):
-    """Pulls a book from crate, extracts target BODs via reverse sweep, returns book.
-    target_bods are already sorted descending by pos (extract_bods does this too).
-    Returns dict mapping original pos -> extracted serial in backpack.
-    """
-    world_save_guard()
-    MoveItem(book_serial, 1, Backpack(), 0, 0, 0)
-    Wait(1200)
-
-    inv_file = get_inventory_file(book_serial)
-    inventory = []
-    if os.path.exists(inv_file):
-        try:
-            with open(inv_file, "r") as f:
-                inventory = json.load(f)
-        except Exception:
-            pass
-
-    extracted = extract_bods(book_serial, target_bods, inventory)
-
-    world_save_guard()
-    MoveItem(book_serial, 1, crate_serial, 0, 0, 0)
-    Wait(1200)
-
-    return extracted
-
-
-def _route_extracted(extracted_map, actions, consegna, scartare, crate):
-    """Routes extracted BODs to their destinations. Works through actions one by one.
-    For 'move' actions, batches inserts per destination book.
-    """
-    dest_batches = defaultdict(lambda: ([], []))
-
-    for action_type, bod, dest in actions:
-        orig_pos = bod.get("pos")
-        extracted_serial = extracted_map.get(orig_pos)
-        if not extracted_serial:
-            continue
-
-        if action_type == "move":
-            dest_batches[dest][0].append(extracted_serial)
-            dest_batches[dest][1].append(bod)
-        elif action_type == "consegna" and consegna:
-            world_save_guard()
-            MoveItem(extracted_serial, 0, consegna, 0, 0, 0)
-            Wait(800)
-        elif action_type == "scartare" and scartare:
-            world_save_guard()
-            MoveItem(extracted_serial, 0, scartare, 0, 0, 0)
-            Wait(800)
-
-    # Insert moves into destination books (pull book, insert, return)
-    for dest_book, (serials, data_list) in dest_batches.items():
-        if not serials or check_abort():
-            continue
-        AddToSystemJournal(f"Inserting {len(serials)} BODs into {hex(dest_book)}...")
-        world_save_guard()
-        MoveItem(dest_book, 1, Backpack(), 0, 0, 0)
-        Wait(1200)
-
-        for bod_serial, bod_data in zip(serials, data_list):
-            if check_abort():
-                break
-            world_save_guard()
-            MoveItem(bod_serial, 0, dest_book, 0, 0, 0)
-            Wait(1000)
-            clean = {
-                "type": bod_data["type"],
-                "item": bod_data["item"],
-                "quality": bod_data["quality"],
-                "material": bod_data["material"],
-                "amount": bod_data["amount"],
-                "category": bod_data.get("category", "Small Bods"),
-            }
-            if bod_data["type"] == "Large":
-                clean["prize_id"] = bod_data.get("prize_id")
-            append_to_inventory(clean, dest_book)
-
-        world_save_guard()
-        MoveItem(dest_book, 1, crate, 0, 0, 0)
-        Wait(1200)
-
-
-def run_smart_trim(config, cycle_type):
-    """Main entry: analyze, then execute in small batches to respect backpack limits."""
-    crate = config.get("containers", {}).get("ConservaCrate", 0)
-    book_serials = _get_book_serials(config, cycle_type)
-    tier1 = config.get("conserva_manager", {}).get("keep_tier1", 4)
-    tier2 = config.get("conserva_manager", {}).get("keep_tier2", 6)
-    overflow_dest = _get_overflow_dest(config, cycle_type)
-
-    if not crate or not book_serials:
-        AddToSystemJournal("Conserva Manager: Missing crate or book configuration.")
-        return
-
-    inventories = load_all_inventories(book_serials)
-    plan = analyze_and_plan(inventories, book_serials, config, tier1, tier2, cycle_type)
-
-    for line in plan["summary"]:
-        AddToSystemJournal(line)
-
-    # Group all actions by source book
-    actions_by_book = defaultdict(list)
-    for bod, from_book, to_book in plan["moves"]:
-        if from_book != to_book:
-            actions_by_book[from_book].append(("move", bod, to_book))
-    for bod, from_book in plan.get("to_overflow", []):
-        if overflow_dest and from_book != overflow_dest:
-            actions_by_book[from_book].append(("move", bod, overflow_dest))
-
-    total_processed = 0
-
-    for source_book, actions in actions_by_book.items():
-        if check_abort():
-            break
-
-        # Process in batches of MAX_BATCH to keep backpack under control
-        for batch_start in range(0, len(actions), MAX_BATCH):
-            if check_abort():
-                break
-
-            batch = actions[batch_start:batch_start + MAX_BATCH]
-            target_bods = [a[1] for a in batch]
-
-            AddToSystemJournal(
-                f"Batch {batch_start // MAX_BATCH + 1}: "
-                f"extracting {len(target_bods)} from {hex(source_book)}..."
-            )
-
-            # Extract (reverse sweep — descending pos, handled by extract_bods)
-            extracted_map = _extract_from_book(source_book, target_bods, crate)
-
-            # Route extracted BODs before next batch
-            _route_extracted(extracted_map, batch, consegna, scartare, crate)
-            total_processed += len(extracted_map)
-
-    AddToSystemJournal(f"=== TRIM COMPLETE: {total_processed} BODs processed ===")
-
-
-# ---------------------------------------------------------------------------
-# Diagnostic — test if GetGumpInfo returns all pages at once
-# ---------------------------------------------------------------------------
-
-def test_gump_pages(config, cycle_type):
-    """Tests NumGumpTextEntry + NumGumpButton to drop a BOD by index."""
-    crate = config.get("containers", {}).get("ConservaCrate", 0)
-    book_serials = _get_book_serials(config, cycle_type)
-    if not book_serials:
-        AddToSystemJournal("Test: No books configured.")
-        return
-    serial = book_serials[0]
-
-    AddToSystemJournal(f"=== TEXT ENTRY DROP TEST: {hex(serial)} ===")
-
-    # Pull book from crate
-    if crate:
-        MoveItem(serial, 1, Backpack(), 0, 0, 0)
-        Wait(1200)
-
-    close_all_gumps()
-    UseObject(serial)
-    Wait(2000)
-
-    idx = -1
-    for i in range(GetGumpsCount()):
-        if GetGumpID(i) == BOOK_GUMP_ID:
-            idx = i
-            break
-    if idx == -1:
-        AddToSystemJournal("Test: Failed to open book gump.")
-        if crate:
-            MoveItem(serial, 1, crate, 0, 0, 0)
-        return
-
-    g = GetGumpInfo(idx)
-
-    # Dump ALL gump element types and counts
-    for key in g:
-        val = g[key]
-        if isinstance(val, list):
-            AddToSystemJournal(f"  {key}: {len(val)} entries")
-        else:
-            AddToSystemJournal(f"  {key}: {val}")
-
-    # Dump TextEntries (input fields)
-    text_entries = g.get('TextEntries', [])
-    AddToSystemJournal(f"  TextEntries detail:")
-    for te in text_entries:
-        AddToSystemJournal(f"    {te}")
-
-    # Dump ALL buttons (not just >= 5)
-    all_btns = g.get('GumpButtons', [])
-    AddToSystemJournal(f"  All buttons:")
-    for b in all_btns:
-        AddToSystemJournal(f"    RetVal={b.get('ReturnValue')} Page={b.get('Page')} PageID={b.get('PageID')} X={b.get('X')} Y={b.get('Y')}")
-
-    # Now try: enter a position in text entry and press a button
-    # Use LAST position (safest — descending extraction principle)
-    FindType(BOD_TYPE, Backpack())
-    bp_before = list(GetFoundList())
-
-    # Target last item in the book — use a high index
-    test_pos = "398"  # 0-indexed last item in a 399-BOD book
-    AddToSystemJournal(f"  Trying: NumGumpTextEntry({idx}, 3, '{test_pos}') + NumGumpButton({idx}, 50)")
-
-    NumGumpTextEntry(idx, 3, test_pos)
-    Wait(300)
-    NumGumpButton(idx, 50)
-    Wait(2000)
-
-    FindType(BOD_TYPE, Backpack())
-    bp_after = list(GetFoundList())
-    new_in_bp = [b for b in bp_after if b not in bp_before]
-
-    if new_in_bp:
-        AddToSystemJournal(f"  SUCCESS! BOD extracted: {hex(new_in_bp[0])}")
-        # Put it back
-        MoveItem(new_in_bp[0], 0, serial, 0, 0, 0)
-        Wait(1000)
-        AddToSystemJournal(f"  Returned BOD to book.")
-    else:
-        AddToSystemJournal(f"  No BOD dropped. Trying alternative button IDs...")
-        # Try a few other button values
-        for try_btn in [1, 2, 4, 0]:
-            close_all_gumps()
-            Wait(500)
-            UseObject(serial)
-            Wait(2000)
-            for i in range(GetGumpsCount()):
-                if GetGumpID(i) == BOOK_GUMP_ID:
-                    idx = i
-                    break
-
-            NumGumpTextEntry(idx, 3, test_pos)
-            Wait(300)
-            NumGumpButton(idx, try_btn)
-            Wait(2000)
-
-            FindType(BOD_TYPE, Backpack())
-            bp_after2 = list(GetFoundList())
-            new2 = [b for b in bp_after2 if b not in bp_before]
-            if new2:
-                AddToSystemJournal(f"  SUCCESS with button {try_btn}! BOD: {hex(new2[0])}")
-                MoveItem(new2[0], 0, serial, 0, 0, 0)
-                Wait(1000)
-                break
-            else:
-                AddToSystemJournal(f"  Button {try_btn}: no drop")
-
-    # Cleanup
-    close_all_gumps()
-    if crate:
-        MoveItem(serial, 1, crate, 0, 0, 0)
-        Wait(1000)
-
-    AddToSystemJournal("=== TEXT ENTRY DROP TEST COMPLETE ===")
