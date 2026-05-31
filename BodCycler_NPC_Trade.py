@@ -1,4 +1,7 @@
-from stealth import *
+try:
+    from stealth import *
+except ImportError:
+    pass  # Linux native Stealth: the py_stealth launcher injects the API into builtins
 import json
 import os
 import time

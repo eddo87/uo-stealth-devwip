@@ -217,3 +217,22 @@ def drop_bods_batch(get_serial_fn, positions, pause_ms=150):
             dropped += 1
         time.sleep(pause_ms / 1000.0)
     return dropped
+
+
+# ---------------------------------------------------------------------------
+# Platform dispatch
+# ---------------------------------------------------------------------------
+# Everything above is the Windows backend (injected DLL + TCP listener on 48821).
+# On native Linux Stealth (e.g. the Docker/RDP container) there is no DLL and no
+# listener: the Linux backend clones Stealth's game socket FD via pidfd_getfd(2)
+# and sends on it directly. The module-level code above is harmless to evaluate
+# on Linux (it only opens a socket lazily inside connect(), which we never call),
+# so we simply rebind the public API to the Linux implementation here.
+import sys as _sys
+
+if _sys.platform.startswith("linux"):
+    from BodCycler_PacketBridge_linux import (
+        connect, disconnect, is_connected, status, set_socket,
+        set_socket_by_probe, clear_cached_handle, probe_peer, inject_raw,
+        send_gump_response, drop_bod, drop_bods_batch,
+    )

@@ -1,7 +1,10 @@
 # BodCycler_Utils.py
 # Single source of truth for shared constants, file I/O, and UI helpers.
 
-from stealth import *
+try:
+    from stealth import *
+except ImportError:
+    pass  # Linux native Stealth: the py_stealth launcher injects the API into builtins
 import json
 import os
 import time
@@ -199,18 +202,23 @@ def world_save_guard():
 # Shared File Paths
 # All scripts must use these — never re-declare them locally.
 # ---------------------------------------------------------------------------
-CONFIG_FILE      = f"{StealthPath()}Scripts\\{CharName()}_bodcycler_config.json"
-STATS_FILE       = f"{StealthPath()}Scripts\\{CharName()}_bodcycler_stats.json"
-INVENTORY_FILE   = f"{StealthPath()}Scripts\\{CharName()}_bodcycler_inventory.json"  # legacy fallback
+def _scripts_file(name):
+    """Path to a file in Stealth's Scripts dir. os.path.join keeps separators
+    correct on both Windows (backslash) and Linux (forward slash)."""
+    return os.path.join(StealthPath(), "Scripts", name)
+
+CONFIG_FILE      = _scripts_file(f"{CharName()}_bodcycler_config.json")
+STATS_FILE       = _scripts_file(f"{CharName()}_bodcycler_stats.json")
+INVENTORY_FILE   = _scripts_file(f"{CharName()}_bodcycler_inventory.json")  # legacy fallback
 
 def get_inventory_file(book_serial):
     """Returns a per-book inventory JSON path keyed by the Conserva book serial.
     One file per physical book — Tailor and Smith never share the same database.
     """
-    return f"{StealthPath()}Scripts\\{CharName()}_bodcycler_inventory_{hex(book_serial)}.json"
-SUPPLY_FILE      = f"{StealthPath()}Scripts\\{CharName()}_bodcycler_supplies.json"
-PERFORMANCE_FILE = f"{StealthPath()}Scripts\\{CharName()}_bodcycler_performance.json"
-LOG_FILE         = f"{StealthPath()}Scripts\\{CharName()}_bodcycler_log.txt"
+    return _scripts_file(f"{CharName()}_bodcycler_inventory_{hex(book_serial)}.json")
+SUPPLY_FILE      = _scripts_file(f"{CharName()}_bodcycler_supplies.json")
+PERFORMANCE_FILE = _scripts_file(f"{CharName()}_bodcycler_performance.json")
+LOG_FILE         = _scripts_file(f"{CharName()}_bodcycler_log.txt")
 
 # ---------------------------------------------------------------------------
 # Shared Game Constants

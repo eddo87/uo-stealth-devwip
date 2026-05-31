@@ -1,4 +1,7 @@
-from stealth import *
+try:
+    from stealth import *
+except ImportError:
+    pass  # Linux native Stealth: the py_stealth launcher injects the API into builtins
 import os
 import json
 import copy
@@ -46,7 +49,7 @@ except ImportError as e:
 
 
 # --- Configuration & Globals ---
-ICON_FILE = f"{StealthPath()}Scripts\\bod_cycler.ico"
+ICON_FILE = os.path.join(StealthPath(), "Scripts", "bod_cycler.ico")
 
 STATS = {
     "start_time": None,
@@ -755,31 +758,31 @@ class BodCyclerGUI(threading.Thread):
             self.root.after(0, lambda: self.vars["status"].set(f"Status: {status_text}"))
         set_status(status_text)
 
-    def _is_stopped(self):
+    def _cycle_stopped(self):
         with _STATS_LOCK:
             return STATS["status"] == "Stopped"
 
     def master_cycle_thread(self):
         AddToSystemJournal("=== MASTER CYCLE INITIATED ===")
-        while not self._is_stopped():
+        while not self._cycle_stopped():
             try:
                 # STEP 0: Ensure character is at home before doing anything
                 self._recall_home()
 
                 # STEP 1: Check Supplies & Maintain Tools (must run before crafting)
-                if self._is_stopped(): break
+                if self._cycle_stopped(): break
                 self.set_global_status("Running (Supplies)")
                 ClientPrintEx(Self(), 1, 1, "Master: Checking Supplies...")
                 BodCycler_CheckSupplies.check_supplies()
 
                 # STEP 2: Craft Items & Fill BODs
-                if self._is_stopped(): break
+                if self._cycle_stopped(): break
                 self.set_global_status("Running (Crafting)")
                 ClientPrintEx(Self(), 1, 1, "Master: Filling BODs...")
                 BodCycler_Crafting.run_crafting_cycle()
 
                 # STEP 2.2: BOD Collection (if window is open)
-                if self._is_stopped(): break
+                if self._cycle_stopped(): break
                 try:
                     if BodCycler_TakeBods.should_collect_bods():
                         self.set_global_status("Running (BOD Collection)")
@@ -796,7 +799,7 @@ class BodCyclerGUI(threading.Thread):
                     AddToSystemJournal(f"TakeBods check skipped: {_te}")
 
                 # STEP 2.5: Assembly Check
-                if self._is_stopped(): break
+                if self._cycle_stopped(): break
 
                 try:
                     _cfg = load_config()
@@ -835,18 +838,18 @@ class BodCyclerGUI(threading.Thread):
                     AddToSystemJournal(f"Assembly step failed: {_e}")
 
                 # STEP 3: Travel, Trade, & Return
-                if self._is_stopped(): break
+                if self._cycle_stopped(): break
                 self.set_global_status("Running (Trading)")
                 ClientPrintEx(Self(), 1, 1, "Master: Commencing NPC Trade...")
                 BodCycler_NPC_Trade.execute_trade_loop()
 
                 # LOOP PAUSE
-                if self._is_stopped(): break
+                if self._cycle_stopped(): break
                 self.set_global_status("Running (Cooldown)")
                 AddToSystemJournal("Cycle complete. Fumando una sigaretta...")
 
                 for _ in range(3):
-                    if self._is_stopped(): break
+                    if self._cycle_stopped(): break
                     time.sleep(1)
 
             except Exception as e:
