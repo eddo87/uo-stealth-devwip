@@ -31,7 +31,15 @@ COLLECTION_COOLDOWN  = 3300  # 55 min in seconds — prevents re-firing in same 
 
 
 def should_collect_bods() -> bool:
-    """True when inside the hourly window (:55–:05) AND ≥55 min since last collection."""
+    """True when automatic collection is enabled in config AND inside the hourly
+    window (:55–:05) AND ≥55 min since last collection.
+
+    The config flag (bots.collection_enabled, default True) governs ONLY the
+    automatic cycle trigger. The manual "Take BODs Now" GUI button calls
+    run_take_bods_cycle() directly and is not affected by this toggle.
+    """
+    if not load_config().get("bots", {}).get("collection_enabled", True):
+        return False
     m = datetime.now().minute
     if not (m >= COLLECT_START_MINUTE or m < COLLECT_END_MINUTE):
         return False

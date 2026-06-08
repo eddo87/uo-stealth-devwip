@@ -30,3 +30,4 @@ query_bridge/
 uo_packet_injector/target2/
 docs/debug_scripts/
 uo_packet_injector/target/
+deploy_bodcycler.ps1

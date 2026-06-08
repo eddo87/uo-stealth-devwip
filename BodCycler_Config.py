@@ -96,7 +96,8 @@ DEFAULT_CONFIG = {
     "home": { "X": 0, "Y": 0, "Z": 0 },
     "bots": {
         "crafter_profile": "ed4",
-        "collector_profiles": ["ed2", "ed3", "ed5"]
+        "collector_profiles": ["ed2", "ed3", "ed5"],
+        "collection_enabled": True
     },
     "prize_filter": {
         "tailor": [23, 24],
@@ -147,6 +148,7 @@ class BodCyclerGUI(threading.Thread):
         if "bots" not in self.config: self.config["bots"] = {"crafter_profile": "ed4", "collector_profiles": ["ed2", "ed3", "ed5"]}
         if "crafter_profile" not in self.config["bots"]: self.config["bots"]["crafter_profile"] = "ed4"
         if "collector_profiles" not in self.config["bots"]: self.config["bots"]["collector_profiles"] = ["ed2", "ed3", "ed5"]
+        if "collection_enabled" not in self.config["bots"]: self.config["bots"]["collection_enabled"] = True
         if "conserva_books_tailor" not in self.config: self.config["conserva_books_tailor"] = [0, 0, 0]
         elif len(self.config["conserva_books_tailor"]) > 3: self.config["conserva_books_tailor"] = self.config["conserva_books_tailor"][:3]
         if "conserva_books_smith" not in self.config: self.config["conserva_books_smith"] = [0, 0, 0]
@@ -195,6 +197,8 @@ class BodCyclerGUI(threading.Thread):
         if "collector_profiles" in self.vars:
             raw = self.vars["collector_profiles"].get()
             self.config.setdefault("bots", {})["collector_profiles"] = [p.strip() for p in raw.split(",") if p.strip()]
+        if "collection_enabled" in self.vars:
+            self.config.setdefault("bots", {})["collection_enabled"] = bool(self.vars["collection_enabled"].get())
 
         # Sync active 'books' from the correct per-mode sub-dict before writing
         cycle = self.config.get("cycle_type", "Tailor")
@@ -1208,6 +1212,15 @@ class BodCyclerGUI(threading.Thread):
             Entry(f_r, textvariable=self.vars[var_key], width=22,
                   font=("Tahoma", 8)).pack(side=LEFT, padx=4)
         _lbl(t5, "(collectors: comma-separated)", fg="#888").pack(anchor="w", padx=4)
+
+        # Toggle: governs ONLY the automatic in-cycle collection (the :55–:05
+        # window). The "Take BODs Now" button below always works regardless.
+        self.vars["collection_enabled"] = BooleanVar(
+            value=bool(bots_cfg.get("collection_enabled", True)))
+        Checkbutton(t5, text="Auto-collect BODs during cycle",
+                    variable=self.vars["collection_enabled"],
+                    bg=BG, font=("Tahoma", 8, "bold")).pack(anchor="w", padx=4, pady=(8, 0))
+
         _btn(t5, "Take BODs Now", self.trigger_take_bods, "#87CEEB",
              font=("Tahoma", 9, "bold"), width=16).pack(pady=(10, 4))
 

@@ -489,23 +489,47 @@ def is_prize_enabled(prize_id, config):
     return prize_id in enabled
 
 
-TALISMAN_TYPE = 0x2F5B
+# Crafting talisman graphics vary by shard/charge state — scan the whole range
+# rather than a single id (the old single TALISMAN_TYPE = 0x2F5B missed 0x2F59).
+TALISMAN_TYPE  = 0x2F5B
+TALISMAN_TYPES = (0x2F58, 0x2F59, 0x2F5A, 0x2F5B)
 
 def swap_talisman(cycle_type, config):
-    """Equips the correct talisman for the given cycle_type.
-    Lookup order: stored serial in config → tooltip keyword scan in backpack.
-    Logs + Discord alert if not found; returns True on success, False on failure.
+    """Ensures the configured talisman for cycle_type is equipped.
+
+    Hardened against the daily server-restart window (~07:00): right after a
+    connection blip the equipment layer is transiently unsynced and
+    ObjAtLayer() reads 0 even though the talisman is worn. Treating that 0 as
+    "wrong talisman" is what caused swap_talisman to strip a working talisman
+    and then fail to re-equip against a half-dead session. We (1) settle the
+    connection, (2) retry the layer read before concluding anything, (3) only
+    unequip when a talisman is actually present, and (4) retry equip + verify.
+
+    The match/verify uses SERIAL EQUALITY against ObjAtLayer — instant and
+    reliable. We deliberately do NOT match by tooltip: GetTooltip() returns
+    empty for a freshly-equipped item until the client fetches it from the
+    server, which produced false TALISMAN_FAILs even when the right talisman
+    was on. Tooltip keyword is used only in the rare no-serial fallback, where
+    the candidate is a settled backpack item with a cached tooltip.
+
+    Returns True if the configured talisman ends up equipped, False otherwise.
     """
     keyword       = "tailoring" if cycle_type == "Tailor" else "blacksmithing"
     target_serial = config.get("talismans", {}).get(cycle_type, 0)
     layer         = TalismanLayer()
 
-    # Fallback: scan backpack by tooltip keyword if serial not configured
+    # Never touch equipment mid-reconnect — block until the session is live.
+    connection_guard()
+
+    # Fallback: scan backpack by tooltip keyword if no serial is configured.
     if not target_serial:
-        FindType(TALISMAN_TYPE, Backpack())
-        for item in GetFoundList():
-            if keyword in GetTooltip(item).lower():
-                target_serial = item
+        for t_type in TALISMAN_TYPES:
+            FindType(t_type, Backpack())
+            for item in GetFoundList():
+                if keyword in (GetTooltip(item) or "").lower():
+                    target_serial = item
+                    break
+            if target_serial:
                 break
 
     if not target_serial:
@@ -514,19 +538,27 @@ def swap_talisman(cycle_type, config):
         log_event("TALISMAN_FAIL", msg)
         return False
 
-    # Already wearing the right one
-    if ObjAtLayer(layer) == target_serial:
-        return True
+    # Already wearing the right one? Retry the READ — post-reconnect ObjAtLayer
+    # can return 0 before the paperdoll syncs; a transient empty layer must not
+    # be read as "wrong talisman" and trigger a needless strip.
+    for _ in range(8):
+        equipped = ObjAtLayer(layer)
+        if equipped == target_serial:
+            return True
+        if equipped:          # a different item is genuinely on — stop waiting
+            break
+        Wait(500)             # empty layer: wait for equipment to sync
 
-    # Unequip current talisman, equip new one
-    UnEquip(layer)
-    Wait(600)
-    Equip(layer, target_serial)
-    Wait(600)
-
-    if ObjAtLayer(layer) == target_serial:
-        AddToSystemJournal(f"[Talisman] Equipped {cycle_type} talisman ({hex(target_serial)}).")
-        return True
+    # Swap: unequip only if something is actually on, then equip + verify by serial.
+    for _ in range(3):
+        if ObjAtLayer(layer):
+            UnEquip(layer)
+            Wait(800)
+        Equip(layer, target_serial)
+        Wait(800)
+        if ObjAtLayer(layer) == target_serial:
+            AddToSystemJournal(f"[Talisman] Equipped {cycle_type} talisman ({hex(target_serial)}).")
+            return True
 
     msg = f"[Talisman] Failed to equip {cycle_type} talisman ({hex(target_serial)})."
     AddToSystemJournal(msg)
